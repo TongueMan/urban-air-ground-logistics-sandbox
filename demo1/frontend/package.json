@@ -1,0 +1,21 @@
+{
+  "name": "zhixun-lianyi-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "test": "node --test tests/patrolMotion.test.mjs tests/patrolSpeed.test.mjs"
+  },
+  "dependencies": {
+    "@baidumap/mapv-three": "1.6.2",
+    "three": "0.180.0",
+    "vue": "3.3.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "4.2.3",
+    "vite": "4.4.9"
+  }
+}
+

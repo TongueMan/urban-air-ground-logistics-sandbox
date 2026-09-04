@@ -1,0 +1,123 @@
+name: zhixun-demo1
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-zhixun_demo}
+      MYSQL_USER: ${MYSQL_USER:-zhixun}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zhixun-local-password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-zhixun-local-root-password}
+      TZ: Asia/Shanghai
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 20s
+    networks: [demo-net]
+
+  mqtt:
+    image: eclipse-mosquitto:2.0.22
+    restart: unless-stopped
+    volumes:
+      - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mqtt-data:/mosquitto/data
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_pub -h 127.0.0.1 -t zhixun/health -m ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [demo-net]
+
+  mediamtx:
+    image: bluenviron/mediamtx@sha256:12ed3d5aabb589ce21895a11b58c6b58b988b6dc3c89283dc31d6689381f3272
+    restart: unless-stopped
+    environment:
+      MTX_WEBRTCADDITIONALHOSTS: ${MEDIA_WEBRTC_ADDITIONAL_HOSTS:-127.0.0.1}
+      MTX_WEBRTCLOCALTCPADDRESS: :8189
+      MTX_HLS: "no"
+    ports:
+      - "8189:8189/udp"
+      - "8189:8189/tcp"
+    networks: [demo-net]
+
+  media-publisher:
+    build: ./deploy/media-publisher
+    restart: unless-stopped
+    depends_on:
+      mediamtx:
+        condition: service_started
+    environment:
+      MEDIA_RTSP_HOST: mediamtx
+    volumes:
+      - ./media:/media-input:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/zhixun-media.ready"]
+      interval: 5s
+      timeout: 2s
+      retries: 20
+    networks: [demo-net]
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-zhixun_demo}
+      MYSQL_USER: ${MYSQL_USER:-zhixun}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zhixun-local-password}
+      MQTT_URL: tcp://mqtt:1883
+      DEMO_COOKIE_SECRET: ${DEMO_COOKIE_SECRET:-local-only-change-before-deploy-zhixun}
+      DEMO_MAX_ACTIVE_SESSIONS: ${DEMO_MAX_ACTIVE_SESSIONS:-12}
+      DEMO_MAX_QUEUE_SIZE: ${DEMO_MAX_QUEUE_SIZE:-100}
+      DEMO_SESSION_DURATION_SECONDS: ${DEMO_SESSION_DURATION_SECONDS:-180}
+      DEMO_DISCONNECT_EXPIRY_SECONDS: ${DEMO_DISCONNECT_EXPIRY_SECONDS:-75}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8095/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 15s
+    networks: [demo-net]
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+      media-publisher:
+        condition: service_healthy
+    environment:
+      FRONTEND_BAIDU_MAP_AK: ${FRONTEND_BAIDU_MAP_AK:-}
+      FRONTEND_MEDIA_BASE: /media
+    volumes:
+      - ./media:/usr/share/nginx/html/fallback-media:ro
+    ports:
+      - "${DEMO_HTTP_PORT:-8088}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep -q ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [demo-net]
+
+networks:
+  demo-net:
+    driver: bridge
+
+volumes:
+  mysql-data:
+  mqtt-data:

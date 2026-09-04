@@ -1,0 +1,27 @@
+services:
+  mysql:
+    mem_limit: 700m
+    cpus: 0.45
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --innodb-buffer-pool-size=256M
+      - --max-connections=80
+  mqtt:
+    mem_limit: 96m
+    cpus: 0.10
+  mediamtx:
+    mem_limit: 128m
+    cpus: 0.15
+  media-publisher:
+    mem_limit: 256m
+    cpus: 0.25
+  backend:
+    mem_limit: 900m
+    cpus: 0.65
+    environment:
+      JAVA_TOOL_OPTIONS: -Xms128m -Xmx560m
+      DEMO_MAX_ACTIVE_SESSIONS: ${DEMO_MAX_ACTIVE_SESSIONS:-12}
+  frontend:
+    mem_limit: 128m
+    cpus: 0.20
