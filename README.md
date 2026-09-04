@@ -1,5 +1,7 @@
 # Urban Air-Ground Cooperative Inspection Platform
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 > 智巡联翼｜城市车机协同巡检平台
 
 An urban inspection platform for coordinated ground vehicles and UAVs,
