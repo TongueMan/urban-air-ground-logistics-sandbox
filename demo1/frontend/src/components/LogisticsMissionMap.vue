@@ -198,6 +198,22 @@ function airspaceVolumes() {
     return frozen.map(volume => {
       const from = Number(volume.activeFromSimulationMs || 0), until = volume.activeUntilSimulationMs == null ? Infinity : Number(volume.activeUntilSimulationMs)
       const lead = Number(volume.activationLeadMs || 0), expansion = Math.max(1, Number(volume.expansionDurationMs || 1))
+      if (volume.dynamic === true && volume.ruleType === 'TEMPORARY_NO_FLY' && Number(volume.cyclePeriodMs) > 0) {
+        const anchor = Number(volume.cycleAnchorSimulationMs ?? from)
+        const period = Math.max(1, Number(volume.cyclePeriodMs))
+        const activeDuration = Math.min(period, Math.max(1, Number(volume.activeDurationMs ?? (until - from))))
+        const contraction = Math.min(activeDuration, Math.max(1, Number(volume.contractionDurationMs || 1)))
+        if (replayTime < anchor) return { ...volume, state: 'SCHEDULED', activationRatio: 0, startsInMs: anchor - replayTime, remainingMs: activeDuration, threatLevel: 'NORMAL' }
+        const cursor = ((replayTime - anchor) % period + period) % period
+        const cycleStart = replayTime - cursor
+        const state = cursor < expansion ? 'ACTIVATING' : cursor < activeDuration - contraction ? 'ACTIVE' : cursor < activeDuration ? 'CLEARING' : 'SCHEDULED'
+        const activationRatio = state === 'ACTIVATING' ? Math.max(.05, Math.min(.95, cursor / expansion))
+          : state === 'ACTIVE' ? 1
+            : state === 'CLEARING' ? Math.max(.05, Math.min(.95, (activeDuration - cursor) / contraction)) : 0
+        const nextStart = state === 'SCHEDULED' ? cycleStart + period : cycleStart
+        return { ...volume, state, activationRatio, activeFromSimulationMs: nextStart, activeUntilSimulationMs: nextStart + activeDuration,
+          startsInMs: state === 'SCHEDULED' ? nextStart - replayTime : 0, remainingMs: state === 'SCHEDULED' ? activeDuration : Math.max(0, cycleStart + activeDuration - replayTime), threatLevel: 'NORMAL' }
+      }
       const state = replayTime >= until ? 'EXPIRED' : replayTime < from - lead ? 'SCHEDULED' : replayTime < from ? 'ACTIVATING' : 'ACTIVE'
       const activationRatio = state === 'ACTIVE' ? Math.min(1, (replayTime - from) / expansion) : state === 'ACTIVATING' ? Math.max(.05, 1 - (from - replayTime) / Math.max(lead, expansion)) : 0
       return { ...volume, state, activationRatio, remainingMs: Number.isFinite(until) ? Math.max(0, until - replayTime) : null, threatLevel: 'NORMAL' }
@@ -251,17 +267,21 @@ function conflictMarkerCoordinate(conflict) {
 function conflictLabelSource(conflicts = []) {
   const data = mapvthree.GeoJSONDataSource.fromGeoJSON(featureCollection(conflicts.map(conflict => ({
     type: 'Feature', id: conflict.id, geometry: { type: 'Point', coordinates: conflictMarkerCoordinate(conflict) },
-    properties: { volumeId: conflict.volumeId, distance: Math.round(Number(conflict.distanceMeters || 0)), eta: Math.round(Number(conflict.estimatedEntrySeconds || 0)), threatLevel: conflict.threatLevel, ruleType: conflict.ruleType }
+    properties: { volumeId: conflict.volumeId, distance: Math.round(Number(conflict.distanceMeters || 0)), eta: Math.round(Number(conflict.estimatedEntrySeconds || 0)), threatLevel: conflict.threatLevel, ruleType: conflict.ruleType,
+      predictive: conflict.predictive === true, currentlyActive: conflict.currentlyActive === true }
   })).filter(feature => feature.geometry.coordinates)))
-  ;['volumeId', 'distance', 'eta', 'threatLevel', 'ruleType'].forEach(attribute => data.defineAttribute(attribute, attribute))
+  ;['volumeId', 'distance', 'eta', 'threatLevel', 'ruleType', 'predictive', 'currentlyActive'].forEach(attribute => data.defineAttribute(attribute, attribute))
   return data
 }
 function renderConflictLabel(item) {
   const attributes = item?.attributes || item
   const node = document.createElement('button'); node.type = 'button'; node.className = `airspace-conflict-marker threat-${String(attributes.threatLevel || 'conflict').toLowerCase()}`
   if (String(attributes.ruleType || '') === 'ABSOLUTE_NO_FLY') node.dataset.tutorialId = 'red-airspace-conflict'
-  const title = document.createElement('b'); title.textContent = '×  空域冲突'
+  const predictive = attributes.predictive === true || attributes.predictive === 'true'
+  const active = attributes.currentlyActive === true || attributes.currentlyActive === 'true'
+  const title = document.createElement('b'); title.textContent = predictive ? '◇  预测冲突' : '×  空域冲突'
   const detail = document.createElement('span'); detail.textContent = `${attributes.distance} 米 · 预计 ${attributes.eta} 秒`
+  node.setAttribute('aria-label', `${predictive ? '预测空域冲突' : '空域冲突'}，${active ? '空域当前生效' : '空域当前未生效'}，预计${attributes.eta}秒后到达`)
   node.append(title, detail); node.addEventListener('click', event => { event.stopPropagation(); emit('select-airspace', String(attributes.volumeId || '')) })
   return node
 }
@@ -1303,7 +1323,7 @@ function updateAirspaceVisuals() {
   if (airspaceLabelLayer) airspaceLabelLayer.visible = layers.airspace && visibleVolumes.length > 0
   const sourceConflicts = Array.isArray(props.mission?.airspace?.conflicts) ? props.mission.airspace.conflicts : []
   const conflicts = visibleAirspaceConflicts(sourceConflicts, volumes, props.tutorialRedConflictLocked)
-  const nextConflictSignature = conflicts.map(conflict => `${conflict.id}:${conflict.distanceMeters}:${conflict.estimatedEntrySeconds}:${conflict.threatLevel}`).join('|')
+  const nextConflictSignature = conflicts.map(conflict => `${conflict.id}:${conflict.distanceMeters}:${conflict.estimatedEntrySeconds}:${conflict.threatLevel}:${conflict.predictive}:${conflict.currentlyActive}`).join('|')
   if (conflictLabelLayer && nextConflictSignature !== conflictLabelSignature) { conflictLabelLayer.dataSource = conflictLabelSource(conflicts); conflictLabelSignature = nextConflictSignature }
   if (conflictLabelLayer) conflictLabelLayer.visible = layers.airspace && conflicts.length > 0
 }

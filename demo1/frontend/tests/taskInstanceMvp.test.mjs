@@ -130,6 +130,16 @@ test('static active airspace is visible at simulation zero while dynamic airspac
   assert.match(missionMap, /setViewport\(focusPoints, missionViewportOptions\(\)\)/)
   assert.match(missionMap, /AIRSPACE_LABEL_ALTITUDE_METERS = 12/)
   assert.match(missionMap, /CONFLICT_LABEL_ALTITUDE_METERS = 18/)
+  assert.match(missionMap, /cycleAnchorSimulationMs/)
+  assert.match(missionMap, /state === 'CLEARING'/)
+})
+
+test('temporary airspace keeps predictive conflict UI while its visual cycle is inactive', () => {
+  assert.match(airspaceInspector, /conflict\.predictive \? '预测空域冲突' : '空域冲突'/)
+  assert.match(airspaceInspector, /CONTINUE_DIRECT: '保持原航线'/)
+  assert.match(airspaceInspector, /已解除，等待无人机通过/)
+  assert.match(missionMap, /predictive: conflict\.predictive === true/)
+  assert.match(missionMap, /predictive \? '◇  预测冲突' : '×  空域冲突'/)
 })
 
 test('tutorial hides only the red conflict action before rewind', () => {
@@ -219,7 +229,7 @@ test('digital airspace renders multi-volume corridors, threat styling and runtim
   assert.match(missionMap, /conflictSegments/)
   assert.match(missionMap, /ALTITUDE_CORRIDOR/)
   assert.match(missionMap, /corridorFloorMeters/)
-  assert.match(airspaceInspector, />空域冲突</)
+  assert.match(airspaceInspector, /预测空域冲突/)
   assert.doesNotMatch(airspaceInspector, /AIRSPACE CONFLICT/)
   assert.match(airspaceInspector, /从侧面绕飞/)
   assert.match(airspaceInspector, /爬升越过/)

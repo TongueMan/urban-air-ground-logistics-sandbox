@@ -14,9 +14,9 @@
         <div><dt>影响航线</dt><dd>{{ conflict ? '当前无人机航线' : '无当前冲突' }}</dd></div>
       </dl>
       <section v-if="conflict" class="conflict-card" aria-label="航线冲突预测">
-        <span>空域冲突</span>
+        <span>{{ conflict.predictive ? '预测空域冲突' : '空域冲突' }}</span>
         <b>{{ Math.round(Number(conflict.distanceMeters || 0)) }} m</b>
-        <small>预计 {{ Math.round(Number(conflict.estimatedEntrySeconds || 0)) }} 秒后到达冲突点 · {{ threatLabel }}</small>
+        <small>预计 {{ Math.round(Number(conflict.estimatedEntrySeconds || 0)) }} 秒后到达冲突点 · {{ conflictPhaseText }}</small>
       </section>
       <section v-if="isRisk" class="risk-card" aria-label="风险区耗电规则">
         <span>额外能耗</span><b>区内耗电 ×{{ Number(volume.energyMultiplier || 2.5).toFixed(1) }}</b>
@@ -33,6 +33,7 @@
         <span>粉钻挑战</span>
         <b>{{ money(linkedDiamond.rewardMinor) }}</b>
         <small v-if="diamondForfeited" class="diamond-forfeited">已因进入紫色禁入层永久失去本枚奖励</small>
+        <small v-else-if="linkedDiamond.requiredAction === 'CONTINUE_DIRECT'">粉钻位于原航线上；真实经过即可入账，若橙区当时生效也会同时计罚</small>
         <small v-else>粉钻位于“{{ linkedDiamond.actionLabel }}”航线上；选择对应处置并真实经过后立即入账</small>
       </section>
       <p v-if="volume.selectedAction" class="action-result">{{ volume.selectedAction.message }}</p>
@@ -67,14 +68,21 @@ const linkedDiamond = computed(() => rewardDiamonds.value.find(item => String(it
 const ruleKey = computed(() => String(volume.value?.ruleType || '').toLowerCase())
 const threatKey = computed(() => String(volume.value?.threatLevel || 'NORMAL').toLowerCase())
 const ruleLabel = computed(() => ({ ABSOLUTE_NO_FLY: '绝对禁飞', TEMPORARY_NO_FLY: '临时禁飞', DANGER_AIRSPACE: '危险空域', RISK_AIRSPACE: '风险空域', ALTITUDE_RESTRICTED: '高度限制', ALTITUDE_CORRIDOR: '高度通行走廊' })[volume.value?.ruleType] || '受限空域')
-const stateLabel = computed(() => ({ SCHEDULED: '待生效', ACTIVATING: '正在建立', ACTIVE: '已生效', EXPIRED: '已解除' })[volume.value?.state] || volume.value?.state || '已冻结')
+const stateLabel = computed(() => ({ SCHEDULED: '暂时解除', ACTIVATING: '正在展开', ACTIVE: '已生效', CLEARING: '正在收缩', EXPIRED: '已解除' })[volume.value?.state] || volume.value?.state || '已冻结')
 const threatLabel = computed(() => ({ NORMAL: '常态', NEAR: '接近', CONFLICT: '存在冲突', IMMINENT: '即将进入', VIOLATION: '已经侵入' })[volume.value?.threatLevel] || '常态')
 const reasonLabel = computed(() => ({ PROTECTED_FACILITY: '核心设施保护', TEMPORARY_RESTRICTION: '临时作业管制', WIND_DISTURBANCE: '低空风扰风险', LOW_ALTITUDE_OPERATION: '低空作业限高' })[volume.value?.reason] || volume.value?.reason || '任务规则')
 const lifecycleText = computed(() => {
+  if (volume.value?.clearanceActive) return '已解除，等待无人机通过'
   if (volume.value?.state === 'SCHEDULED') return `${Math.ceil(Number(volume.value.startsInMs || 0) / 1000)} 秒后生效`
   if (volume.value?.state === 'ACTIVATING') return '边界正在展开'
+  if (volume.value?.state === 'CLEARING') return '边界正在收缩，即将解除'
   if (volume.value?.state === 'ACTIVE' && volume.value.remainingMs != null) return `${Math.ceil(Number(volume.value.remainingMs) / 1000)} 秒后解除`
   return stateLabel.value
+})
+const conflictPhaseText = computed(() => {
+  if (volume.value?.ruleType !== 'TEMPORARY_NO_FLY') return threatLabel.value
+  if (conflict.value?.clearanceActive) return '通行保护中'
+  return conflict.value?.currentlyActive ? `橙区当前生效 · ${threatLabel.value}` : `橙区当前未生效 · ${threatLabel.value}`
 })
 const isCorridor = computed(() => volume.value?.ruleType === 'ALTITUDE_CORRIDOR')
 const isRisk = computed(() => volume.value?.ruleType === 'RISK_AIRSPACE')
@@ -93,7 +101,7 @@ const finePolicyText = computed(() => {
 })
 const fineAvoidanceText = computed(() => isCorridor.value ? '保持在合法高度带或从侧面绕行可避免罚款' : '按面板中的安全动作提前处置可避免罚款')
 function money(minor) { return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 0 }).format(Number(minor || 0) / 100) }
-const actionLabels = { ACCEPT_RISK: '接受风险继续', DETOUR: '从侧面绕飞', CLIMB_OVER: '爬升越过', TRANSIT_CORRIDOR: '调整高度穿廊', WAIT_UNTIL_CLEAR: '等待解除', RETURN_TO_RECOVERY: '立即返航' }
+const actionLabels = { ACCEPT_RISK: '接受风险继续', CONTINUE_DIRECT: '保持原航线', DETOUR: '从侧面绕飞', CLIMB_OVER: '爬升越过', TRANSIT_CORRIDOR: '调整高度穿廊', WAIT_UNTIL_CLEAR: '等待解除', RETURN_TO_RECOVERY: '立即返航' }
 async function apply(action) { try { await runtime.executeAirspaceAction(volume.value.id, action) } catch (_) {} }
 </script>
 

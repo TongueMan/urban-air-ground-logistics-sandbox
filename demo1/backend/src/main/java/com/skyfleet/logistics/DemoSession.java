@@ -53,6 +53,8 @@ public final class DemoSession {
     public final Map<String, List<List<Number>>> airRouteOverrides = new ConcurrentHashMap<>();
     public final Map<String, Map<String, Object>> airspaceActions = new ConcurrentHashMap<>();
     public final Map<String, Long> uavWaitUntilMs = new ConcurrentHashMap<>();
+    /** WAIT_UNTIL_CLEAR suppresses a temporary zone until the UAV passes it, followed by a short grace period. */
+    public final Map<String, Long> temporaryAirspaceClearanceUntilMs = new ConcurrentHashMap<>();
     public final Set<String> collectedDeliveryPointIds = ConcurrentHashMap.newKeySet();
     public final Set<String> collectedDiamondIds = ConcurrentHashMap.newKeySet();
     public final Set<String> forfeitedDiamondIds = ConcurrentHashMap.newKeySet();

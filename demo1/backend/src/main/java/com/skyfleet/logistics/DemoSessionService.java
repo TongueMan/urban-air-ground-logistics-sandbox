@@ -29,6 +29,12 @@ public class DemoSessionService {
     private static final long RED_FIXED_FINE_MINOR = 800_000;
     private static final long CORRIDOR_FIXED_FINE_MINOR = 300_000;
     private static final double REWIND_CHECKPOINT_LEAD_SECONDS = 60;
+    static final double TEMPORARY_AIRSPACE_APPROACH_SECONDS = 60;
+    static final long TEMPORARY_AIRSPACE_CYCLE_MS = 30_000;
+    static final long TEMPORARY_AIRSPACE_ACTIVE_MS = 18_000;
+    static final long TEMPORARY_AIRSPACE_EXPANSION_MS = 3_000;
+    static final long TEMPORARY_AIRSPACE_CONTRACTION_MS = 3_000;
+    static final long TEMPORARY_AIRSPACE_POST_PASS_GRACE_MS = 10_000;
     private final MissionCatalog catalog;
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
@@ -192,7 +198,7 @@ public class DemoSessionService {
         DemoSession session = owned(id, visitorHash);
         if (!"RUNNING".equals(session.status)) throw new DemoException(HttpStatus.CONFLICT, "只有运行中的任务可以处置空域冲突");
         String action = String.valueOf(actionType == null ? "" : actionType).trim().toUpperCase(Locale.ROOT);
-        if (!Set.of("ACCEPT_RISK", "DETOUR", "CLIMB_OVER", "WAIT_UNTIL_CLEAR", "RETURN_TO_RECOVERY", "TRANSIT_CORRIDOR").contains(action))
+        if (!Set.of("ACCEPT_RISK", "CONTINUE_DIRECT", "DETOUR", "CLIMB_OVER", "WAIT_UNTIL_CLEAR", "RETURN_TO_RECOVERY", "TRANSIT_CORRIDOR").contains(action))
             throw new DemoException(HttpStatus.BAD_REQUEST, "不支持的空域处置动作");
         Map<String, Object> airspace = airspaceRuntime(session, definition(session));
         Map<String, Object> volume = mapList(airspace.get("runtimeVolumes")).stream()
@@ -216,6 +222,9 @@ public class DemoSessionService {
         List<double[]> override = null;
         if ("ACCEPT_RISK".equals(action)) {
             if (AirspaceGeometry.blocking(volume)) throw new DemoException(HttpStatus.CONFLICT, "阻断空域不能接受风险后继续穿越");
+        } else if ("CONTINUE_DIRECT".equals(action)) {
+            if (!"TEMPORARY_NO_FLY".equals(volume.get("ruleType")))
+                throw new DemoException(HttpStatus.CONFLICT, "只有临时禁飞区支持保持原航线");
         } else if ("DETOUR".equals(action)) override = AirspaceGeometry.detour(route, volume, currentRouteProgress);
         else if ("TRANSIT_CORRIDOR".equals(action)) {
             if (!"ALTITUDE_CORRIDOR".equals(volume.get("ruleType")))
@@ -232,6 +241,7 @@ public class DemoSessionService {
             Object until = volume.get("activeUntilSimulationMs");
             if (!(until instanceof Number number)) throw new DemoException(HttpStatus.CONFLICT, "该空域没有明确解除时间，不能等待放行");
             session.uavWaitUntilMs.put(actorId, number.longValue());
+            session.temporaryAirspaceClearanceUntilMs.put(volumeId, Long.MAX_VALUE);
         } else {
             double[] recovery = recoveryPoint(route(session, routeId), "recoveryPoint");
             double altitude = Math.max(currentPoint[2], recovery[2] + 18);
@@ -247,7 +257,7 @@ public class DemoSessionService {
             session.previousActorPositions.put(actorId, currentPoint.clone());
         }
         double maneuverDelaySeconds = switch (action) {
-            case "ACCEPT_RISK", "WAIT_UNTIL_CLEAR" -> 0;
+            case "ACCEPT_RISK", "CONTINUE_DIRECT", "WAIT_UNTIL_CLEAR" -> 0;
             default -> Math.max(0, number(castMap(definition(session).get("airVehicle")).get("maneuverDelaySeconds"), 0));
         };
         if (maneuverDelaySeconds > 0) {
@@ -259,9 +269,14 @@ public class DemoSessionService {
         response.put("id", actionId); response.put("runId", id); response.put("volumeId", volumeId); response.put("actorId", actorId);
         response.put("actionType", action); response.put("status", "APPLIED"); response.put("simulationTimeMs", session.simulationElapsedMs);
         response.put("maneuverDelaySeconds", maneuverDelaySeconds);
-        String actionMessage = switch (action) { case "ACCEPT_RISK" -> "已记录风险接受，区内耗电将按 2.5 倍计算"; case "DETOUR" -> "已生成并切换为绕飞航线"; case "CLIMB_OVER" -> "已切换为合法高度爬升绕越";
+        if ("WAIT_UNTIL_CLEAR".equals(action)) {
+            long waitUntil = session.uavWaitUntilMs.getOrDefault(actorId, session.simulationElapsedMs);
+            response.put("waitUntilSimulationMs", waitUntil);
+            response.put("waitSeconds", Math.max(0, Math.ceil((waitUntil - session.simulationElapsedMs) / 1000.0)));
+        }
+        String actionMessage = switch (action) { case "ACCEPT_RISK" -> "已记录风险接受，区内耗电将按 2.5 倍计算"; case "CONTINUE_DIRECT" -> "无人机将保持原航线；穿越时若橙区生效，将同时领取粉钻并按侵入计罚"; case "DETOUR" -> "已生成并切换为绕飞航线"; case "CLIMB_OVER" -> "已切换为合法高度爬升绕越";
             case "TRANSIT_CORRIDOR" -> "已切换为平滑升降的合法高度走廊航线";
-            case "WAIT_UNTIL_CLEAR" -> "无人机将在安全位置等待空域解除"; default -> "无人机已转入返航回收航线"; };
+            case "WAIT_UNTIL_CLEAR" -> "无人机将在安全位置短暂等待，解除后保留充足通行时间"; default -> "无人机已转入返航回收航线"; };
         response.put("message", maneuverDelaySeconds > 0
                 ? actionMessage + "，机动响应 " + Math.round(maneuverDelaySeconds) + " 秒" : actionMessage);
         session.airspaceActions.put(volumeId, response);
@@ -498,6 +513,7 @@ public class DemoSessionService {
                 session.missionPhase = phase(session, session.progress);
             }
             if (session.taskInstanceId != null) {
+                processTemporaryAirspaceWarnings(session);
                 processRedAirspaceWarnings(session);
                 processRewindCheckpoints(session);
                 try { processMissionEconomy(session, simulationStepMs); }
@@ -548,6 +564,30 @@ public class DemoSessionService {
             warning.put("estimatedEntrySeconds", conflict.get("estimatedEntrySeconds"));
             warning.put("level", number(conflict.get("estimatedEntrySeconds"), 60) <= 15 ? "CRITICAL" : "WARNING");
             warning.put("message", "绝对禁飞区已进入 60 秒处置范围，仿真倍速已降至 1 倍");
+            broadcastDelta(session, "airspace-warning", Map.of("warning", warning,
+                    "session", session.publicView(), "airspace", runtime));
+        }
+    }
+
+    private void processTemporaryAirspaceWarnings(DemoSession session) {
+        Map<String, Object> runtime = airspaceRuntime(session, definition(session));
+        for (Map<String, Object> conflict : mapList(runtime.get("conflicts"))) {
+            if (!"TEMPORARY_NO_FLY".equals(conflict.get("ruleType"))
+                    || number(conflict.get("estimatedEntrySeconds"), Double.POSITIVE_INFINITY)
+                    > TEMPORARY_AIRSPACE_APPROACH_SECONDS) continue;
+            String volumeId = String.valueOf(conflict.get("volumeId"));
+            if (!session.airspaceWarningVolumeIds.add(volumeId)) continue;
+            if (session.timeScale > 1) {
+                session.timeScale = 1;
+                jdbc.update("UPDATE demo_session SET time_scale=1 WHERE id=?", session.id);
+            }
+            Map<String, Object> warning = new LinkedHashMap<>();
+            warning.put("volumeId", volumeId); warning.put("ruleType", "TEMPORARY_NO_FLY");
+            warning.put("estimatedEntrySeconds", conflict.get("estimatedEntrySeconds"));
+            warning.put("level", "WARNING");
+            warning.put("message", Boolean.TRUE.equals(conflict.get("currentlyActive"))
+                    ? "临时禁飞区预测冲突：橙区当前生效，可直行承担罚款或选择安全路线；仿真倍速已降至 1 倍"
+                    : "临时禁飞区预测冲突：橙区当前处于解除间隔，可直行或提前选择绕飞/爬升；仿真倍速已降至 1 倍");
             broadcastDelta(session, "airspace-warning", Map.of("warning", warning,
                     "session", session.publicView(), "airspace", runtime));
         }
@@ -641,6 +681,7 @@ public class DemoSessionService {
         state.put("airRouteOverrides", new LinkedHashMap<>(session.airRouteOverrides));
         state.put("airspaceActions", new LinkedHashMap<>(session.airspaceActions));
         state.put("uavWaitUntilMs", new LinkedHashMap<>(session.uavWaitUntilMs));
+        state.put("temporaryAirspaceClearanceUntilMs", new LinkedHashMap<>(session.temporaryAirspaceClearanceUntilMs));
         state.put("collectedDeliveryPointIds", new ArrayList<>(session.collectedDeliveryPointIds));
         state.put("collectedDiamondIds", new ArrayList<>(session.collectedDiamondIds));
         state.put("forfeitedDiamondIds", new ArrayList<>(session.forfeitedDiamondIds));
@@ -680,6 +721,7 @@ public class DemoSessionService {
         replaceMap(session.airRouteOverrides, state.get("airRouteOverrides"), new TypeReference<Map<String, List<List<Number>>>>() {});
         replaceMap(session.airspaceActions, state.get("airspaceActions"), new TypeReference<Map<String, Map<String, Object>>>() {});
         replaceMap(session.uavWaitUntilMs, state.get("uavWaitUntilMs"), new TypeReference<Map<String, Long>>() {});
+        replaceMap(session.temporaryAirspaceClearanceUntilMs, state.get("temporaryAirspaceClearanceUntilMs"), new TypeReference<Map<String, Long>>() {});
         replaceSet(session.collectedDeliveryPointIds, state.get("collectedDeliveryPointIds"));
         replaceSet(session.collectedDiamondIds, state.get("collectedDiamondIds"));
         replaceSet(session.forfeitedDiamondIds, state.get("forfeitedDiamondIds"));
@@ -885,7 +927,7 @@ public class DemoSessionService {
                 if (!AirspaceGeometry.blocking(volume)) continue;
                 String volumeId = String.valueOf(volume.get("id"));
                 String key = actorId + "|" + volumeId;
-                double exposure = AirspaceGeometry.active(volume, session.simulationElapsedMs)
+                double exposure = isAirspaceActive(session, volume)
                         ? AirspaceGeometry.segmentExposureFraction(previous, current, volume) : 0;
                 if (exposure > 0) {
                     exposedKeys.add(key);
@@ -1486,9 +1528,11 @@ public class DemoSessionService {
                             .findFirst().ifPresent(actor -> session.airRouteOverrides.put(String.valueOf(actor.get("routeId")), override));
                 }
                 if ("WAIT_UNTIL_CLEAR".equals(result.getString("action_type"))) {
-                    mapList(castMap(definition(session).get("airspace")).get("volumes")).stream()
-                            .filter(volume -> volumeId.equals(String.valueOf(volume.get("id"))))
-                            .findFirst().ifPresent(volume -> { if (volume.get("activeUntilSimulationMs") instanceof Number until) session.uavWaitUntilMs.put(actorId, until.longValue()); });
+                    Object waitUntil = response.get("waitUntilSimulationMs");
+                    if (waitUntil instanceof Number until) {
+                        session.uavWaitUntilMs.put(actorId, until.longValue());
+                        session.temporaryAirspaceClearanceUntilMs.put(volumeId, Long.MAX_VALUE);
+                    }
                 }
             } catch (Exception ignored) {}
         });
@@ -1835,6 +1879,10 @@ public class DemoSessionService {
         String challengeType = String.valueOf(diamond.getOrDefault("challengeType",
                 diamond.containsKey("linkedVolumeId") ? "AIRSPACE" : "ROUTE"));
         if ("ROUTE".equals(challengeType)) return true;
+        // A straight-line orange challenge is earned by the actual trajectory.
+        // Keeping the original route requires no command, so the bound UAV may
+        // collect it whether or not the optional CONTINUE_DIRECT card was used.
+        if ("CONTINUE_DIRECT".equals(String.valueOf(diamond.get("requiredAction")))) return true;
         return selectedAction != null
                 && Objects.equals(String.valueOf(diamond.get("linkedVolumeId")), String.valueOf(selectedAction.get("volumeId")))
                 && Objects.equals(String.valueOf(diamond.get("requiredAction")), String.valueOf(selectedAction.get("actionType")))
@@ -1922,6 +1970,8 @@ public class DemoSessionService {
                 session.routeProgress.getOrDefault(String.valueOf(uav.get("id")), 0.0));
         double speed = uav == null ? 5.5 : number(route(session, String.valueOf(uav.get("routeId"))).get("nominalSpeedKph"), 20) / 3.6;
         double currentAltitude = uav == null ? 0 : actorPosition(session, uav)[2];
+        boolean uavAirborne = uav != null && !Set.of("ON_CARRIER", "RECOVERED").contains(
+                session.uavStates.getOrDefault(String.valueOf(uav.get("id")), "ON_CARRIER"));
         for (Map<String, Object> raw : mapList(source.get("volumes"))) {
             Map<String, Object> volume = new LinkedHashMap<>(raw);
             long from = raw.get("activeFromSimulationMs") instanceof Number value ? value.longValue() : 0;
@@ -1930,7 +1980,23 @@ public class DemoSessionService {
             long expansion = Math.max(1, raw.get("expansionDurationMs") instanceof Number value ? value.longValue() : 1);
             String state;
             double activationRatio;
-            if (session.simulationElapsedMs >= until) { state = "EXPIRED"; activationRatio = 0; }
+            AirspaceGeometry.Conflict prospectiveConflict = uav == null ? null
+                    : AirspaceGeometry.conflict(airRoute, raw, routeProgress);
+            boolean approachManaged = Boolean.TRUE.equals(raw.get("dynamic"))
+                    && "TEMPORARY_NO_FLY".equals(raw.get("ruleType"));
+            boolean currentlyActive = false;
+            boolean clearanceActive = false;
+            if (approachManaged) {
+                String volumeId = String.valueOf(raw.get("id"));
+                TemporaryAirspaceLifecycle lifecycle = temporaryAirspaceLifecycle(
+                        session.simulationElapsedMs,
+                        Math.round(number(raw.get("cycleAnchorSimulationMs"), from)));
+                clearanceActive = temporaryAirspaceClearanceActive(session, volumeId, prospectiveConflict);
+                state = lifecycle.state(); activationRatio = lifecycle.activationRatio();
+                from = lifecycle.activeFromMs(); until = lifecycle.activeUntilMs();
+                currentlyActive = lifecycle.currentlyActive() && !clearanceActive;
+                if (clearanceActive) { state = "SCHEDULED"; activationRatio = 0; }
+            } else if (session.simulationElapsedMs >= until) { state = "EXPIRED"; activationRatio = 0; }
             else if (session.simulationElapsedMs < from - lead) { state = "SCHEDULED"; activationRatio = 0; }
             else if (session.simulationElapsedMs < from) { state = "ACTIVATING"; activationRatio = MissionMath.clamp(1 - (from - session.simulationElapsedMs) / (double) Math.max(lead, expansion), .05, .95); }
             else {
@@ -1939,20 +2005,34 @@ public class DemoSessionService {
                         ? Math.min(1, (session.simulationElapsedMs - from) / (double) expansion)
                         : 1;
             }
+            if (!approachManaged) currentlyActive = "ACTIVE".equals(state);
             volume.put("state", state); volume.put("activationRatio", activationRatio);
-            volume.put("startsInMs", Math.max(0, from - session.simulationElapsedMs));
+            volume.put("activeFromSimulationMs", from); volume.put("activeUntilSimulationMs", until);
+            volume.put("startsInMs", clearanceActive ? null : Math.max(0, from - session.simulationElapsedMs));
             volume.put("remainingMs", until == Long.MAX_VALUE ? null : Math.max(0, until - session.simulationElapsedMs));
+            volume.put("currentlyActive", currentlyActive); volume.put("clearanceActive", clearanceActive);
             if ("ALTITUDE_CORRIDOR".equals(volume.get("ruleType"))) volume.put("currentAltitudeMeters", currentAltitude);
             volume.put("selectedAction", session.airspaceActions.get(volume.get("id")));
             Map<String, Object> applied = session.airspaceActions.get(String.valueOf(volume.get("id")));
             boolean acceptedRisk = applied != null && "ACCEPT_RISK".equals(applied.get("actionType"));
-            AirspaceGeometry.Conflict conflict = "ACTIVE".equals(state) && !acceptedRisk ? AirspaceGeometry.conflict(airRoute, volume, routeProgress) : null;
+            double etaSeconds = prospectiveConflict == null ? Double.POSITIVE_INFINITY
+                    : prospectiveConflict.distanceMeters() / Math.max(.1, speed);
+            boolean temporaryPrediction = approachManaged && uavAirborne
+                    && etaSeconds <= number(raw.get("approachWarningSeconds"), TEMPORARY_AIRSPACE_APPROACH_SECONDS);
+            AirspaceGeometry.Conflict conflict = !acceptedRisk && prospectiveConflict != null
+                    && (temporaryPrediction || (!approachManaged && currentlyActive)) ? prospectiveConflict : null;
             String threat = "NORMAL";
             if (conflict != null) {
                 Map<String, Object> view = AirspaceGeometry.view(conflict, volume, speed);
                 view.put("actorId", uav == null ? null : uav.get("id"));
+                view.put("currentlyActive", currentlyActive); view.put("predictive", approachManaged && !currentlyActive);
+                view.put("lifecycleState", state); view.put("clearanceActive", clearanceActive);
+                if (approachManaged && !currentlyActive && view.get("availableActions") instanceof List<?> actions) {
+                    view.put("availableActions", actions.stream().map(String::valueOf)
+                            .filter(action -> !"WAIT_UNTIL_CLEAR".equals(action)).toList());
+                }
                 long eta = ((Number) view.get("estimatedEntrySeconds")).longValue();
-                boolean insideNow = conflict.startProgress() <= routeProgress + .25;
+                boolean insideNow = currentlyActive && conflict.startProgress() <= routeProgress + .25;
                 threat = insideNow ? "VIOLATION" : eta <= 15 ? "IMMINENT" : eta <= 60 ? "CONFLICT" : "NEAR";
                 view.put("threatLevel", threat); conflicts.add(view);
             } else if ("ACTIVATING".equals(state)) threat = "NEAR";
@@ -1962,6 +2042,58 @@ public class DemoSessionService {
         result.put("conflicts", conflicts); result.put("actions", new ArrayList<>(session.airspaceActions.values()));
         result.put("simulationTimeMs", session.simulationElapsedMs);
         return result;
+    }
+
+    static TemporaryAirspaceLifecycle temporaryAirspaceLifecycle(long simulationTimeMs, long cycleAnchorMs) {
+        if (simulationTimeMs < cycleAnchorMs)
+            return new TemporaryAirspaceLifecycle("SCHEDULED", 0, cycleAnchorMs,
+                    cycleAnchorMs + TEMPORARY_AIRSPACE_ACTIVE_MS, false);
+        long cursor = Math.floorMod(simulationTimeMs - cycleAnchorMs, TEMPORARY_AIRSPACE_CYCLE_MS);
+        long cycleStart = simulationTimeMs - cursor;
+        long activeUntil = cycleStart + TEMPORARY_AIRSPACE_ACTIVE_MS;
+        if (cursor < TEMPORARY_AIRSPACE_EXPANSION_MS)
+            return new TemporaryAirspaceLifecycle("ACTIVATING",
+                    MissionMath.clamp(cursor / (double) TEMPORARY_AIRSPACE_EXPANSION_MS, .05, .95),
+                    cycleStart, activeUntil, true);
+        if (cursor < TEMPORARY_AIRSPACE_ACTIVE_MS - TEMPORARY_AIRSPACE_CONTRACTION_MS)
+            return new TemporaryAirspaceLifecycle("ACTIVE", 1, cycleStart, activeUntil, true);
+        if (cursor < TEMPORARY_AIRSPACE_ACTIVE_MS)
+            return new TemporaryAirspaceLifecycle("CLEARING",
+                    MissionMath.clamp((TEMPORARY_AIRSPACE_ACTIVE_MS - cursor)
+                            / (double) TEMPORARY_AIRSPACE_CONTRACTION_MS, .05, .95),
+                    cycleStart, activeUntil, true);
+        long nextStart = cycleStart + TEMPORARY_AIRSPACE_CYCLE_MS;
+        return new TemporaryAirspaceLifecycle("SCHEDULED", 0, nextStart,
+                nextStart + TEMPORARY_AIRSPACE_ACTIVE_MS, false);
+    }
+
+    record TemporaryAirspaceLifecycle(String state, double activationRatio, long activeFromMs,
+                                      long activeUntilMs, boolean currentlyActive) {}
+
+    private boolean temporaryAirspaceClearanceActive(DemoSession session, String volumeId,
+                                                       AirspaceGeometry.Conflict remainingConflict) {
+        Long clearUntil = session.temporaryAirspaceClearanceUntilMs.get(volumeId);
+        if (clearUntil == null) return false;
+        if (clearUntil == Long.MAX_VALUE) {
+            if (remainingConflict != null) return true;
+            session.temporaryAirspaceClearanceUntilMs.put(volumeId,
+                    session.simulationElapsedMs + TEMPORARY_AIRSPACE_POST_PASS_GRACE_MS);
+            return true;
+        }
+        if (session.simulationElapsedMs < clearUntil) return true;
+        session.temporaryAirspaceClearanceUntilMs.remove(volumeId, clearUntil);
+        return false;
+    }
+
+    private boolean isAirspaceActive(DemoSession session, Map<String, Object> volume) {
+        if (Boolean.TRUE.equals(volume.get("dynamic")) && "TEMPORARY_NO_FLY".equals(volume.get("ruleType"))) {
+            String volumeId = String.valueOf(volume.get("id"));
+            if (session.temporaryAirspaceClearanceUntilMs.containsKey(volumeId)) return false;
+            long anchor = Math.round(number(volume.get("cycleAnchorSimulationMs"),
+                    number(volume.get("activeFromSimulationMs"), 0)));
+            return temporaryAirspaceLifecycle(session.simulationElapsedMs, anchor).currentlyActive();
+        }
+        return AirspaceGeometry.active(volume, session.simulationElapsedMs);
     }
 
     private String writeJson(Object value) {
@@ -1976,7 +2108,7 @@ public class DemoSessionService {
     private List<double[]> safeReturnRoute(DemoSession session, List<double[]> requested) {
         List<double[]> route = new ArrayList<>(requested.stream().map(double[]::clone).toList());
         for (Map<String, Object> volume : mapList(castMap(definition(session).get("airspace")).get("volumes"))) {
-            if (!AirspaceGeometry.blocking(volume) || !AirspaceGeometry.active(volume, session.simulationElapsedMs)) continue;
+            if (!AirspaceGeometry.blocking(volume) || !isAirspaceActive(session, volume)) continue;
             if (AirspaceGeometry.conflict(route, volume, 0) != null) route = AirspaceGeometry.detour(route, volume, 0);
         }
         return route;

@@ -7,8 +7,45 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DemoSessionServiceMotionTest {
+    @Test
+    void temporaryAirspaceFollowsItsOwnRepeatingCycle() {
+        long anchor = 100_000;
+        DemoSessionService.TemporaryAirspaceLifecycle expanding =
+                DemoSessionService.temporaryAirspaceLifecycle(anchor, anchor);
+        assertEquals("ACTIVATING", expanding.state());
+        assertTrue(expanding.currentlyActive());
+
+        DemoSessionService.TemporaryAirspaceLifecycle active =
+                DemoSessionService.temporaryAirspaceLifecycle(anchor + 4_000, anchor);
+        assertEquals("ACTIVE", active.state());
+        assertEquals(anchor + 18_000, active.activeUntilMs());
+
+        DemoSessionService.TemporaryAirspaceLifecycle clearing =
+                DemoSessionService.temporaryAirspaceLifecycle(anchor + 16_000, anchor);
+        assertEquals("CLEARING", clearing.state());
+        assertTrue(clearing.currentlyActive());
+
+        DemoSessionService.TemporaryAirspaceLifecycle clear =
+                DemoSessionService.temporaryAirspaceLifecycle(anchor + 20_000, anchor);
+        assertEquals("SCHEDULED", clear.state());
+        assertFalse(clear.currentlyActive());
+        assertEquals(anchor + 30_000, clear.activeFromMs());
+    }
+
+    @Test
+    void temporaryAirspaceCycleWrapsWithoutDependingOnApproach() {
+        long anchor = 100_000;
+        DemoSessionService.TemporaryAirspaceLifecycle nextCycle =
+                DemoSessionService.temporaryAirspaceLifecycle(anchor + 31_000, anchor);
+        assertEquals("ACTIVATING", nextCycle.state());
+        assertTrue(nextCycle.currentlyActive());
+        assertEquals(anchor + 30_000, nextCycle.activeFromMs());
+    }
+
     @Test
     void everyInteractiveAirspaceRuleCanCreateAnApproachCheckpoint() {
         List<Map<String, Object>> conflicts = List.of(
@@ -109,6 +146,16 @@ class DemoSessionServiceMotionTest {
         Map<String, Object> diamond = Map.of("actorId", "UAV-1", "challengeType", "ROUTE");
         assertEquals(true, DemoSessionService.diamondActionEligible(diamond, "UAV-1", null));
         assertEquals(false, DemoSessionService.diamondActionEligible(diamond, "UAV-2", null));
+    }
+
+    @Test
+    void straightOrangeDiamondNeedsOnlyTheBoundActorsActualTrajectory() {
+        Map<String, Object> diamond = Map.of("actorId", "UAV-1", "challengeType", "AIRSPACE",
+                "linkedVolumeId", "TNFZ-001", "requiredAction", "CONTINUE_DIRECT");
+        assertTrue(DemoSessionService.diamondActionEligible(diamond, "UAV-1", null));
+        assertTrue(DemoSessionService.diamondActionEligible(diamond, "UAV-1",
+                Map.of("volumeId", "TNFZ-001", "actionType", "CONTINUE_DIRECT", "status", "APPLIED")));
+        assertFalse(DemoSessionService.diamondActionEligible(diamond, "UAV-2", null));
     }
 
     @Test

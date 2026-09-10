@@ -284,6 +284,7 @@ class TaskInstanceServiceEconomyTest {
         java.util.Set<String> themes = new java.util.HashSet<>();
         java.util.Set<List<?>> orders = new java.util.HashSet<>();
         java.util.Set<Integer> diamondCounts = new java.util.HashSet<>();
+        java.util.Set<String> orangeDiamondActions = new java.util.HashSet<>();
         for (long seed = 30; seed < 70; seed++) {
             Map<String, Object> plan = plan(service.generate(VISITOR,
                     ScenarioTemplateCatalog.CAMPUS_TEMPLATE_ID, String.valueOf(seed),
@@ -308,7 +309,12 @@ class TaskInstanceServiceEconomyTest {
                 switch (String.valueOf(volume.get("ruleType"))) {
                     case "ABSOLUTE_NO_FLY", "RISK_AIRSPACE" -> assertThat(action).isEqualTo("DETOUR");
                     case "ALTITUDE_CORRIDOR" -> assertThat(action).isEqualTo("TRANSIT_CORRIDOR");
-                    case "TEMPORARY_NO_FLY" -> assertThat(action).isIn("DETOUR", "CLIMB_OVER");
+                    case "TEMPORARY_NO_FLY" -> {
+                        assertThat(action).isIn("CONTINUE_DIRECT", "DETOUR", "CLIMB_OVER");
+                        orangeDiamondActions.add(action);
+                        if ("CONTINUE_DIRECT".equals(action))
+                            assertThat(AirspaceGeometry.contains(volume, coordinate(diamond.get("position")))).isTrue();
+                    }
                     default -> throw new AssertionError("unexpected rule " + volume.get("ruleType"));
                 }
             });
@@ -321,6 +327,7 @@ class TaskInstanceServiceEconomyTest {
                     });
         }
         assertThat(themes).containsExactlyInAnyOrder("RED", "YELLOW", "PURPLE", "ORANGE");
+        assertThat(orangeDiamondActions).containsExactlyInAnyOrder("CONTINUE_DIRECT", "DETOUR", "CLIMB_OVER");
         assertThat(orders.size()).isGreaterThan(4);
         assertThat(diamondCounts).containsExactlyInAnyOrder(2, 3, 4, 5);
     }

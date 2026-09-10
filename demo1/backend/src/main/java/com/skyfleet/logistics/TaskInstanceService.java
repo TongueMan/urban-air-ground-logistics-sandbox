@@ -717,24 +717,47 @@ public class TaskInstanceService {
         List<double[]> detour = AirspaceGeometry.detour(sourceRoute, volume);
         boolean detourAvailable = AirspaceGeometry.conflict(detour, volume, 0) == null;
         if ("TEMPORARY_NO_FLY".equals(rule)) {
+            AirspaceGeometry.Conflict directConflict = AirspaceGeometry.conflict(sourceRoute, volume, 0);
+            if (directConflict == null) throw new CandidateRejected("NO_DIRECT_DIAMOND_ROUTE");
             double climbAltitude = number(volume.get("ceilingMeters"), 100) + 12;
             List<double[]> climb = climbAltitude <= 100
                     ? AirspaceGeometry.climbOver(sourceRoute, volume, climbAltitude) : List.of();
             boolean climbAvailable = !climb.isEmpty() && AirspaceGeometry.conflict(climb, volume, 0) == null;
-            if (!detourAvailable && !climbAvailable) throw new CandidateRejected("NO_DIAMOND_ACTION_ROUTE");
-            String action = climbAvailable && (!detourAvailable || random.nextBoolean()) ? "CLIMB_OVER" : "DETOUR";
-            List<double[]> actionRoute = "CLIMB_OVER".equals(action) ? climb : detour;
-            double[] target = "CLIMB_OVER".equals(action)
-                    ? climbDiamondTarget(actionRoute, climbAltitude)
-                    : detourDiamondTarget(sourceRoute, actionRoute, volume);
-            List<double[]> wrong = "CLIMB_OVER".equals(action) ? detour : climb;
-            if (AirspaceGeometry.contains(volume, target)
-                    || !routePassesReward(actionRoute, target, 10, 8)
-                    || routePassesReward(sourceRoute, target, 10, 8)
-                    || (!wrong.isEmpty() && routePassesReward(wrong, target, 10, 8)))
-                throw new CandidateRejected("DIAMOND_ACTION_NOT_EXCLUSIVE");
+            List<String> choices = new ArrayList<>(List.of("CONTINUE_DIRECT"));
+            if (detourAvailable) choices.add("DETOUR");
+            if (climbAvailable) choices.add("CLIMB_OVER");
+            String action = choices.get(random.nextInt(choices.size()));
+            List<double[]> actionRoute = switch (action) {
+                case "CLIMB_OVER" -> climb;
+                case "DETOUR" -> detour;
+                default -> sourceRoute;
+            };
+            double[] target = switch (action) {
+                case "CLIMB_OVER" -> climbDiamondTarget(actionRoute, climbAltitude);
+                case "DETOUR" -> detourDiamondTarget(sourceRoute, actionRoute, volume);
+                default -> MissionMath.sample(sourceRoute,
+                        (directConflict.startProgress() + directConflict.endProgress()) / 200.0);
+            };
+            if ("CONTINUE_DIRECT".equals(action)) {
+                if (!AirspaceGeometry.contains(volume, target)
+                        || !routePassesReward(sourceRoute, target, 10, 8)
+                        || (detourAvailable && routePassesReward(detour, target, 10, 8))
+                        || (climbAvailable && routePassesReward(climb, target, 10, 8)))
+                    throw new CandidateRejected("DIAMOND_DIRECT_NOT_EXCLUSIVE");
+            } else {
+                List<double[]> wrong = "CLIMB_OVER".equals(action) ? detour : climb;
+                if (AirspaceGeometry.contains(volume, target)
+                        || !routePassesReward(actionRoute, target, 10, 8)
+                        || routePassesReward(sourceRoute, target, 10, 8)
+                        || (!wrong.isEmpty() && routePassesReward(wrong, target, 10, 8)))
+                    throw new CandidateRejected("DIAMOND_ACTION_NOT_EXCLUSIVE");
+            }
             return new ChallengeDiamondPlacement(airspaceDiamond(id, descriptor, volume, target, actionRoute, action,
-                    "CLIMB_OVER".equals(action) ? "爬升越过" : "从侧面绕飞", 10, 8), actionRoute);
+                    switch (action) {
+                        case "CLIMB_OVER" -> "爬升越过";
+                        case "DETOUR" -> "从侧面绕飞";
+                        default -> "保持原航线直行";
+                    }, 10, 8), actionRoute);
         }
 
         if (!detourAvailable) throw new CandidateRejected("NO_DIAMOND_ACTION_ROUTE_" + rule);
@@ -846,6 +869,7 @@ public class TaskInstanceService {
     private static List<double[]> validationActionRoute(List<double[]> route, Map<String, Object> volume,
                                                          String action) {
         return switch (action) {
+            case "CONTINUE_DIRECT" -> route;
             case "TRANSIT_CORRIDOR" -> AirspaceGeometry.transitCorridor(route, volume);
             case "DETOUR" -> AirspaceGeometry.detour(route, volume);
             case "CLIMB_OVER" -> {
@@ -870,7 +894,9 @@ public class TaskInstanceService {
                     .findFirst().orElse(null);
             if (challenge == null) return List.of();
             route = validationActionRoute(route, volume, String.valueOf(challenge.get("requiredAction")));
-            if (route.isEmpty() || AirspaceGeometry.conflict(route, volume, 0) != null) return List.of();
+            boolean directTemporary = "TEMPORARY_NO_FLY".equals(volume.get("ruleType"))
+                    && "CONTINUE_DIRECT".equals(challenge.get("requiredAction"));
+            if (route.isEmpty() || (!directTemporary && AirspaceGeometry.conflict(route, volume, 0) != null)) return List.of();
         }
         return route;
     }
@@ -1091,11 +1117,21 @@ public class TaskInstanceService {
                 violations.add(violation("DIAMOND_REWARD_INVALID", "粉钻位置或固定价值无效"));
                 continue;
             }
-            boolean insideProhibited = airspaceVolumes.stream().anyMatch(volume -> AirspaceGeometry.contains(volume, target));
-            boolean outsideAllowedZone = allowedZones.stream().noneMatch(zone -> pointInPolygon(target, zone));
             String challengeType = String.valueOf(diamond.getOrDefault("challengeType",
                     diamond.containsKey("linkedVolumeId") ? "AIRSPACE" : "ROUTE"));
-            if (insideProhibited || outsideAllowedZone) {
+            String linkedVolumeId = String.valueOf(diamond.getOrDefault("linkedVolumeId", ""));
+            String requiredAction = String.valueOf(diamond.getOrDefault("requiredAction", ""));
+            Map<String, Object> linkedVolume = airspaceVolumes.stream()
+                    .filter(volume -> linkedVolumeId.equals(String.valueOf(volume.get("id"))))
+                    .findFirst().orElse(null);
+            boolean directTemporary = linkedVolume != null
+                    && "TEMPORARY_NO_FLY".equals(linkedVolume.get("ruleType"))
+                    && "CONTINUE_DIRECT".equals(requiredAction);
+            boolean insideDisallowed = airspaceVolumes.stream().anyMatch(volume ->
+                    AirspaceGeometry.contains(volume, target)
+                            && !(directTemporary && linkedVolumeId.equals(String.valueOf(volume.get("id")))));
+            boolean outsideAllowedZone = allowedZones.stream().noneMatch(zone -> pointInPolygon(target, zone));
+            if (insideDisallowed || outsideAllowedZone) {
                 violations.add(violation("DIAMOND_POSITION_INVALID", "粉钻位于禁入体积或允许空域之外"));
             } else if ("ROUTE".equals(challengeType)) {
                 boolean tooCloseToAirspace = airspaceVolumes.stream().anyMatch(volume ->
@@ -1106,15 +1142,10 @@ public class TaskInstanceService {
                         || tooCloseToAirspace)
                     violations.add(violation("ROUTE_DIAMOND_INVALID", "普通粉钻必须随机位于空域缓冲外的正常航段"));
             } else {
-                String linkedVolumeId = String.valueOf(diamond.get("linkedVolumeId"));
-                String requiredAction = String.valueOf(diamond.get("requiredAction"));
-                Map<String, Object> linkedVolume = airspaceVolumes.stream()
-                        .filter(volume -> linkedVolumeId.equals(String.valueOf(volume.get("id"))))
-                        .findFirst().orElse(null);
                 List<double[]> actionRoute = linkedVolume == null ? List.of()
                         : validationActionRoute(airPoints, linkedVolume, requiredAction);
                 if (linkedVolume == null || actionRoute.isEmpty()
-                        || AirspaceGeometry.conflict(actionRoute, linkedVolume, 0) != null
+                        || (!directTemporary && AirspaceGeometry.conflict(actionRoute, linkedVolume, 0) != null)
                         || !rawList(linkedVolume.get("availableActions")).contains(requiredAction))
                     violations.add(violation("DIAMOND_ACTION_NOT_EXCLUSIVE", "挑战粉钻没有绑定可执行且真实可达的安全动作"));
             }
@@ -1348,7 +1379,7 @@ public class TaskInstanceService {
                 double ceiling = Math.min(96, Math.max(78, cruiseAltitude + 6 + random.nextInt(9)));
                 created = volume("TNFZ-001", dynamicLabels.get(variant), "TEMPORARY_NO_FLY", footprint, 0,
                         ceiling, -1L, -1L, dynamicReasons.get(variant), "SEEDED_EVENT", true, true);
-                List<String> actions = new ArrayList<>(List.of("DETOUR"));
+                List<String> actions = new ArrayList<>(List.of("CONTINUE_DIRECT", "DETOUR"));
                 if (ceiling + 12 <= 100) actions.add("CLIMB_OVER");
                 actions.add("WAIT_UNTIL_CLEAR"); actions.add("RETURN_TO_RECOVERY");
                 created.put("availableActions", actions);
@@ -1413,10 +1444,14 @@ public class TaskInstanceService {
             if (!Boolean.TRUE.equals(volume.get("dynamic"))) continue;
             double routeProgress = number(volume.get("routeProgress"), 55) / 100;
             double expectedEntrySeconds = launchAtSeconds + Math.max(0, airSortieSeconds - 40) * routeProgress;
-            long from = Math.round(Math.max(launchAtSeconds, expectedEntrySeconds - 22) * 1000);
-            long until = Math.round(Math.min(durationSeconds, expectedEntrySeconds + 38) * 1000);
-            volume.put("activeFromSimulationMs", from); volume.put("activeUntilSimulationMs", Math.max(from + 30_000, until));
-            volume.put("activationLeadMs", 8_000); volume.put("expansionDurationMs", 5_000);
+            // The orange zone follows an independent repeating cycle. The UAV's
+            // approach only opens prediction UI; it never changes this phase.
+            long anchor = Math.round(Math.max(0, launchAtSeconds) * 1000);
+            volume.put("activeFromSimulationMs", anchor); volume.put("activeUntilSimulationMs", anchor + 18_000);
+            volume.put("cycleAnchorSimulationMs", anchor); volume.put("cyclePeriodMs", 30_000);
+            volume.put("activeDurationMs", 18_000); volume.put("expansionDurationMs", 3_000);
+            volume.put("contractionDurationMs", 3_000); volume.put("approachWarningSeconds", 60);
+            volume.put("expectedEntrySimulationMs", Math.round(expectedEntrySeconds * 1000));
         }
     }
 
