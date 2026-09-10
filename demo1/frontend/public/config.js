@@ -1,4 +1,4 @@
-window.__ZHIXUN_CONFIG__ = Object.freeze({
+window.__SKYFLEET_CONFIG__ = Object.freeze({
   baiduMapAk: '',
   mediaBase: '/media'
 })

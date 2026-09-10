@@ -22,6 +22,7 @@ services:
     environment:
       JAVA_TOOL_OPTIONS: -Xms128m -Xmx560m
       DEMO_MAX_ACTIVE_SESSIONS: ${DEMO_MAX_ACTIVE_SESSIONS:-12}
+      FLEET_DEV_PRICING_ENABLED: ${FLEET_DEV_PRICING_ENABLED:-false}
   frontend:
     mem_limit: 128m
     cpus: 0.20

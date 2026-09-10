@@ -3,11 +3,11 @@ set -eu
 
 host=${MEDIA_RTSP_HOST:-mediamtx}
 input_dir=${MEDIA_INPUT_DIR:-/media-input}
-routes=${MEDIA_FILE_ROUTES:-patrol_uav_cam_01=patrol_uav_cam_01.mp4,patrol_uav_cam_02=patrol_uav_cam_02.mp4,patrol_wash_01=patrol_wash_01.mp4}
+routes=${MEDIA_FILE_ROUTES:-delivery_uav_cam_01=delivery_uav_cam_01.mp4,delivery_uav_cam_02=delivery_uav_cam_02.mp4,delivery_vehicle_cam_01=delivery_vehicle_cam_01.mp4}
 pids=""
 
 stop_publishers() {
-  rm -f /tmp/zhixun-media.ready
+  rm -f /tmp/skyfleet-media.ready
   [ -z "$pids" ] || kill $pids 2>/dev/null || true
   wait 2>/dev/null || true
 }
@@ -28,7 +28,7 @@ IFS=$old_ifs
 
 sleep 4
 for pid in $pids; do kill -0 "$pid" 2>/dev/null || { echo "A publisher failed during startup" >&2; exit 1; }; done
-touch /tmp/zhixun-media.ready
+touch /tmp/skyfleet-media.ready
 
 while :; do
   for pid in $pids; do kill -0 "$pid" 2>/dev/null || exit 1; done

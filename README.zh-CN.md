@@ -1,108 +1,93 @@
-# 城市空地协同巡检平台
+# 城市空地协同物流运营沙盘
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-> 智巡联翼｜城市车机协同巡检平台
+> 在真实三维城市地图上经营、调度并优化地面车辆与低空运输设备。
 
-这是一个面向城市巡检场景的巡检车—无人机协同平台，融合三维地理空间可视化、实时遥测、MQTT 消息通信、任务编排和视频监控能力。
+项目以合肥为首个运营区域。每位访客拥有相互隔离的公司账户、配送任务和车队资产，从有限启动资金与基础运力出发，通过选择车辆、规划空地路线、处置空域约束、完成交付、控制成本和持续投资，逐步构建更高效的城市物流网络。
 
-平台在浏览器三维场景中展示两组“巡检车 + 无人机”编组。每位访客拥有相互隔离的巡检任务，可以体验编组出发、无人机放飞、协同扫描、返航会合、任务完成和历史轨迹回放的完整流程。
+## 当前可玩能力
 
-## 核心能力
-
-- 使用百度 MapV Three 渲染城市三维场景和 BD-09 巡检路线。
-- 通过 Spring Boot 任务状态机协调四台设备的运行仿真。
-- 使用 MQTT 传输遥测数据，并通过 MySQL 完成任务、事件和轨迹持久化。
-- 使用 SSE 向浏览器实时推送任务状态、设备遥测和异常事件。
-- 提供两路无人机视频和一路车载视频，支持 WHEP 播放与 MP4 自动降级。
-- 使用签名 HttpOnly Cookie 隔离访客任务，并提供并发控制和排队机制。
-- 提供适用于本地环境和 2 核 4 GB Linux 服务器的 Docker Compose 配置。
+- 基于百度 MapV Three 的三维城市空间与 BD-09 空地路线。
+- 由 Seed 驱动的动态任务生成，以及冻结、可复现的任务制品。
+- 地面与空中配送点，车型速度、续航、电量和运载倍率均参与权威结算。
+- 绝对禁飞区、风险空域、高度走廊和临时禁飞区的互动处置。
+- 公司余额、幂等账本、车辆采购、出售、出站、召回与充电。
+- 基于 REST、SSE、MQTT 和 MySQL 的服务端权威仿真。
+- 配送记录、真实遥测回放与任务检查点回退。
+- 可选 DeepSeek 解释服务，用于说明服务端计算出的调度备选方案。
+- 三路 WHEP 视频以及 MP4 自动降级播放。
 
 ## 系统架构
 
 ```text
-浏览器 / 三维地图 / 视频监控
-             │ HTTP + SSE
-             ▼
-      Spring Boot 服务 ─── MQTT ─── Mosquitto
-             │
-             ├── MySQL
-             └── MediaMTX / FFmpeg
+Vue 3 / MapV Three / Three.js
+          │ REST + SSE
+          ▼
+       Nginx 网关
+          │
+          ├── Spring Boot 权威仿真 ── MQTT ── Mosquitto
+          │              │
+          │              └── MySQL / Flyway
+          └── MediaMTX / FFmpeg ── WHEP 或 MP4 降级
 ```
 
-完整的数据流和运行服务说明请参阅 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+任务、移动、电量、空域结果、收益、罚款和资产所有权均由后端判定。浏览器只负责呈现状态与提交操作，不在本地直接修改经营结果。
 
-## 技术栈
-
-| 模块 | 主要技术 |
-| --- | --- |
-| 前端 | Vue 3、Vite、Three.js、Baidu MapV Three |
-| 后端 | Java 17、Spring Boot、Flyway |
-| 实时通信 | MQTT、SSE |
-| 数据存储 | MySQL 8.4 |
-| 视频链路 | MediaMTX、WHEP、FFmpeg |
-| 部署 | Docker、Docker Compose、Nginx |
+服务与数据边界详见[架构说明](docs/ARCHITECTURE.md)。
 
 ## 快速开始
 
-### 环境要求
-
-- Docker Engine
-- Docker Compose
-- 可用的百度地图浏览器端 AK
-
-### 启动步骤
-
-在 PowerShell 中执行：
+环境要求：Docker Engine、Docker Compose，以及可用的百度地图浏览器端 AK。
 
 ```powershell
 Set-Location .\demo1
 Copy-Item .env.example .env.local
-```
-
-编辑不会被 Git 跟踪的 `.env.local`，设置百度地图浏览器端 AK：
-
-```dotenv
-FRONTEND_BAIDU_MAP_AK=你的百度地图AK
-```
-
-构建并启动全部服务：
-
-```powershell
+# 在 .env.local 中填写 FRONTEND_BAIDU_MAP_AK
 docker compose --env-file .env.local up -d --build
 ```
 
-等待容器健康后访问：<http://127.0.0.1:8088>
+全部容器健康后访问 <http://127.0.0.1:8088>。服务端百度路线 AK 与 DeepSeek API Key 均为可选项；未配置时系统仍可使用确定性的保底路线与规则解释。
 
-停止服务：
+完整配置、本地开发、接口和验证方式见 [demo1/README.md](demo1/README.md)。
 
-```powershell
-docker compose --env-file .env.local down
-```
+## 技术栈
 
-更多配置、测试和生产部署说明请参阅 [`demo1/README.md`](demo1/README.md)。
+| 模块 | 技术 |
+| --- | --- |
+| 前端 | Vue 3、Vite、Three.js、百度 MapV Three |
+| 后端 | Java 17、Spring Boot、Flyway |
+| 实时通信 | SSE、MQTT |
+| 数据存储 | MySQL 8.4 |
+| 视频链路 | MediaMTX、WHEP、FFmpeg |
+| 部署 | Docker Compose、Nginx |
 
-## 项目目录
+## 仓库结构
 
 ```text
-demo1/
-├─ frontend/     Vue 3、Vite 与 MapV Three 前端
-├─ backend/      Spring Boot 任务与遥测服务
-├─ database/     Flyway 表结构和固定路线数据
-├─ media/        三路共享演示视频
-├─ deploy/       Mosquitto、MediaMTX 和媒体发布配置
-├─ docker-compose.yml
-└─ docker-compose.prod.yml
-
-docs/             架构、数据来源和资源校验记录
+demo1/frontend/    Web 应用、三维任务空间、车队与配送界面
+demo1/backend/     权威仿真、任务、车队和经济服务
+demo1/database/    数据库维护说明
+demo1/media/       共享演示视频源
+demo1/deploy/      网关、MQTT 与媒体发布配置
+demo1/docs/        产品总纲、架构决策与三维资产治理
+docs/              仓库级架构和资源来源说明
 ```
 
-## 地图与资源说明
+## 文档入口
 
-地图数据和路径能力由百度地图开放平台提供。浏览器端 AK 通过 `.env.local` 在运行时注入，不应写入源码、Docker 镜像或 Git 历史。
+- [产品规划与建设基线](demo1/docs/strategy-sandbox/README.md)
+- [实现与运行说明](demo1/README.md)
+- [系统架构](docs/ARCHITECTURE.md)
+- [三维模型资产库](demo1/docs/3d-model-library.md)
+- [资源与数据来源](docs/ASSET_SOURCES.md)
 
-模型、视频和固定路线数据具有独立的来源记录，详见 [`docs/ASSET_SOURCES.md`](docs/ASSET_SOURCES.md)。未完成公开发布条款核验的资源不会提交到本仓库。
+## 范围与安全边界
+
+本项目是可复现的物流运营沙盘，不是现实自动驾驶或无人机控制系统。真实设备命令 Transport 与 ACK 尚未接入；AI 只能解释后端已经计算出的方案，不能修改资格、排名、数值结果或直接控制设备。
+
+真实百度与 DeepSeek 密钥只能写入不会被 Git 跟踪的 `demo1/.env.local`，不得提交到仓库。
 
 ## 许可证
 
-源代码基于 [Apache License 2.0](LICENSE) 开源。地图数据、视频、模型及其他第三方资源遵循各自的授权和服务条款，不因源代码许可证而被重新许可。
+源代码基于 [Apache License 2.0](LICENSE) 开源。地图数据、视频、模型与其他第三方资产继续遵循各自的许可证和服务条款。

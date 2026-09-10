@@ -1,0 +1,39 @@
+.motion-instrument-enter-active,
+.motion-instrument-leave-active {
+  transition: opacity var(--motion-standard) var(--motion-ease-out), transform var(--motion-standard) var(--motion-ease-out);
+}
+.motion-instrument-enter-from,
+.motion-instrument-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+
+.motion-lens-enter-active,
+.motion-lens-leave-active {
+  transition: opacity var(--motion-emphasis) var(--motion-ease-state), transform var(--motion-emphasis) var(--motion-ease-state);
+}
+
+.motion-lens-enter-from,
+.motion-lens-leave-to {
+  opacity: 0;
+  transform: translate3d(16px, -8px, 0) scale(.97);
+}
+
+.state-pulse {
+  animation: state-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes state-pulse {
+  50% { opacity: .42; transform: scale(.9); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .motion-instrument-enter-active,
+  .motion-instrument-leave-active,
+  .motion-lens-enter-active,
+  .motion-lens-leave-active {
+    transition-duration: .01ms !important;
+  }
+
+  .state-pulse { animation: none !important; }
+}

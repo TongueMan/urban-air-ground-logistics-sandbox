@@ -1,12 +1,13 @@
 {
-  "name": "zhixun-lianyi-frontend",
+  "name": "skyfleet-logistics-frontend",
   "private": true,
   "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
-    "test": "node --test tests/patrolMotion.test.mjs tests/patrolSpeed.test.mjs"
+    "test": "node --test tests/missionMotion.test.mjs tests/missionSpeed.test.mjs tests/missionAdapter.test.mjs tests/missionContext.test.mjs tests/missionDelta.test.mjs tests/constitutionGates.test.mjs tests/taskInstanceMvp.test.mjs tests/missionReactions.test.mjs tests/modelAssets.test.mjs tests/fleetHub.test.mjs tests/tutorial.test.mjs tests/appInitialization.test.mjs",
+    "models:verify": "node scripts/verify-model-library.mjs"
   },
   "dependencies": {
     "@baidumap/mapv-three": "1.6.2",
@@ -14,8 +15,7 @@
     "vue": "3.3.4"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "4.2.3",
-    "vite": "4.4.9"
+    "@vitejs/plugin-vue": "6.0.8",
+    "vite": "8.2.2"
   }
 }
-

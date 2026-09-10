@@ -8,6 +8,7 @@ dist/
 *.log
 demo1/media/*.log
 !demo1/media/*.mp4
+demo1/tmp/
 
 # Keep local-only release material and assets with unresolved attribution out of
 # the public repository.

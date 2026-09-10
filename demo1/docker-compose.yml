@@ -1,14 +1,14 @@
-name: zhixun-demo1
+name: skyfleet-logistics-sandbox
 
 services:
   mysql:
     image: mysql:8.4
     restart: unless-stopped
     environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-zhixun_demo}
-      MYSQL_USER: ${MYSQL_USER:-zhixun}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zhixun-local-password}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-zhixun-local-root-password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-skyfleet_logistics}
+      MYSQL_USER: ${MYSQL_USER:-skyfleet}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-skyfleet-local-password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-skyfleet-local-root-password}
       TZ: Asia/Shanghai
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
     volumes:
@@ -28,7 +28,7 @@ services:
       - ./deploy/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - mqtt-data:/mosquitto/data
     healthcheck:
-      test: ["CMD-SHELL", "mosquitto_pub -h 127.0.0.1 -t zhixun/health -m ok"]
+      test: ["CMD-SHELL", "mosquitto_pub -h 127.0.0.1 -t skyfleet/health -m ok"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -57,7 +57,7 @@ services:
     volumes:
       - ./media:/media-input:ro
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/zhixun-media.ready"]
+      test: ["CMD-SHELL", "test -f /tmp/skyfleet-media.ready"]
       interval: 5s
       timeout: 2s
       retries: 20
@@ -73,15 +73,28 @@ services:
         condition: service_healthy
     environment:
       MYSQL_HOST: mysql
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-zhixun_demo}
-      MYSQL_USER: ${MYSQL_USER:-zhixun}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-zhixun-local-password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-skyfleet_logistics}
+      MYSQL_USER: ${MYSQL_USER:-skyfleet}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-skyfleet-local-password}
       MQTT_URL: tcp://mqtt:1883
-      DEMO_COOKIE_SECRET: ${DEMO_COOKIE_SECRET:-local-only-change-before-deploy-zhixun}
+      DEMO_COOKIE_SECRET: ${DEMO_COOKIE_SECRET:-local-only-change-before-deploy-skyfleet}
       DEMO_MAX_ACTIVE_SESSIONS: ${DEMO_MAX_ACTIVE_SESSIONS:-12}
       DEMO_MAX_QUEUE_SIZE: ${DEMO_MAX_QUEUE_SIZE:-100}
       DEMO_SESSION_DURATION_SECONDS: ${DEMO_SESSION_DURATION_SECONDS:-180}
       DEMO_DISCONNECT_EXPIRY_SECONDS: ${DEMO_DISCONNECT_EXPIRY_SECONDS:-75}
+      FLEET_DEV_PRICING_ENABLED: ${FLEET_DEV_PRICING_ENABLED:-true}
+      TRAFFIC_LIGHT_SPACING_METERS: ${TRAFFIC_LIGHT_SPACING_METERS:-360}
+      TRAFFIC_LIGHT_STOP_BUFFER_METERS: ${TRAFFIC_LIGHT_STOP_BUFFER_METERS:-10}
+      BAIDU_ROUTE_AK: ${BAIDU_ROUTE_AK:-}
+      BAIDU_ROUTE_BASE_URL: ${BAIDU_ROUTE_BASE_URL:-https://api.map.baidu.com}
+      BAIDU_ROUTE_CONNECT_TIMEOUT_SECONDS: ${BAIDU_ROUTE_CONNECT_TIMEOUT_SECONDS:-3}
+      BAIDU_ROUTE_RESPONSE_TIMEOUT_SECONDS: ${BAIDU_ROUTE_RESPONSE_TIMEOUT_SECONDS:-6}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+      DEEPSEEK_TIMEOUT_SECONDS: ${DEEPSEEK_TIMEOUT_SECONDS:-20}
+      AI_MAX_ADVISORIES_PER_SESSION: ${AI_MAX_ADVISORIES_PER_SESSION:-5}
+      AI_MIN_INTERVAL_SECONDS: ${AI_MIN_INTERVAL_SECONDS:-10}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8095/actuator/health | grep -q '\"status\":\"UP\"'"]
       interval: 5s

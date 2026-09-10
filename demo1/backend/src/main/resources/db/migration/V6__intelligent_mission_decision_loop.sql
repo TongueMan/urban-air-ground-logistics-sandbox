@@ -1,0 +1,20 @@
+CREATE TABLE demo_ai_decision (
+  id VARCHAR(80) PRIMARY KEY,
+  advisory_id VARCHAR(80) NOT NULL,
+  session_id VARCHAR(40) NOT NULL,
+  signal_id VARCHAR(120) NOT NULL,
+  option_id VARCHAR(80) NOT NULL,
+  decision_type VARCHAR(16) NOT NULL,
+  expected_advisory_status VARCHAR(32) NOT NULL,
+  advisory_status VARCHAR(32) NOT NULL,
+  status VARCHAR(32) NOT NULL,
+  execution_status VARCHAR(24) NOT NULL,
+  requested_at TIMESTAMP(3) NOT NULL,
+  acknowledged_at TIMESTAMP(3) NOT NULL,
+  message VARCHAR(240) NOT NULL,
+  CONSTRAINT fk_decision_advisory FOREIGN KEY (advisory_id) REFERENCES demo_ai_advisory(id) ON DELETE CASCADE,
+  CONSTRAINT fk_decision_session FOREIGN KEY (session_id) REFERENCES demo_session(id) ON DELETE CASCADE,
+  CONSTRAINT fk_decision_signal FOREIGN KEY (signal_id) REFERENCES demo_signal(id) ON DELETE CASCADE,
+  UNIQUE KEY uk_decision_advisory (advisory_id),
+  INDEX idx_decision_history (session_id, acknowledged_at)
+);

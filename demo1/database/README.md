@@ -1,7 +1,42 @@
 # 数据库说明
 
-数据库结构由 Spring Boot 启动时通过 Flyway 自动建立。迁移脚本的唯一维护位置是
-`backend/src/main/resources/db/migration`，固定 BD-09 场景数据位于
-`backend/src/main/resources/mission/patrol-mission.json`。
+数据库结构由 Spring Boot 启动时通过 Flyway 自动建立。迁移脚本的唯一维护位置是：
 
-包含访客任务与排队、固定场景版本、逐设备遥测以及任务事件四类持久化数据。
+```text
+backend/src/main/resources/db/migration/
+```
+
+任务定义位于：
+
+```text
+backend/src/main/resources/mission/logistics-mission.json
+```
+
+## 持久化领域
+
+- 访客身份摘要、并发队列与任务会话
+- 冻结的任务实例、路线制品、参数和校验结果
+- 运行状态、任务事件、命令时间线与检查点
+- 逐设备遥测、实际轨迹与回放数据
+- 公司账户、车队资产、设备状态与充电进度
+- 采购、出售、配送收益、奖励与罚款账本
+- 智能调度建议、人工决策与执行阻断状态
+
+## 维护规则
+
+1. 已进入共享环境的迁移脚本不得改写；结构变化必须新增更高版本迁移。
+2. 金额使用整数分存储，禁止使用浮点数直接表示人民币余额。
+3. 账本、采购、出售、奖励和罚款必须使用稳定幂等键。
+4. 任务、运行、资产和账本查询必须带访客所有权边界。
+5. 路线与任务结果必须保存生成器、规则、目录和随机算法版本。
+6. 回放读取已保存遥测，不以当前代码重新生成过去的运行结果。
+
+## 本地数据
+
+Compose 使用 `mysql-data` 命名卷。普通停止不会删除数据：
+
+```powershell
+docker compose --env-file .env.local down
+```
+
+任何清空命名卷的操作都会永久删除本地公司、资产、任务与账本，必须在明确确认后单独执行。

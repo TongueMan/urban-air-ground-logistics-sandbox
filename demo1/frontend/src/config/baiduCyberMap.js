@@ -1,6 +1,6 @@
 export const HEFEI_CITY_CENTER = [117.2272, 31.8206, 0]
 
-// Shared by the situation and patrol mission maps. Keep the land/building
+// Shared by the situation and logistics mission maps. Keep the land/building
 // palette deliberately dark so the operational overlays remain legible.
 export const BAIDU_CYBER_MAP_STYLE = [
   { featureType: 'all', elementType: 'geometry', stylers: { visibility: 'on', color: '#071326ff' } },

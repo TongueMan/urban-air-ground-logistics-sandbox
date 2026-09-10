@@ -1,0 +1,105 @@
+package com.skyfleet.logistics;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/demo")
+public class TaskInstanceController {
+    private final TaskInstanceService tasks;
+    private final DemoSessionService sessions;
+    private final VisitorIdentity visitors;
+
+    public TaskInstanceController(TaskInstanceService tasks, DemoSessionService sessions, VisitorIdentity visitors) {
+        this.tasks = tasks; this.sessions = sessions; this.visitors = visitors;
+    }
+
+    @GetMapping("/scenario-templates")
+    public Map<String, Object> templates() { return Map.of("items", tasks.templateSummaries()); }
+
+    @PostMapping("/task-instances")
+    public Map<String, Object> generate(@RequestBody GenerateRequest body, HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        return tasks.generate(visitor.visitorHash(), body.scenarioTemplateId(), body.seed(), body.parameters());
+    }
+
+    @GetMapping("/task-instances")
+    public Map<String, Object> history(@RequestParam(required = false) String cursor,
+                                       @RequestParam(defaultValue = "20") int limit,
+                                       HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        return tasks.history(visitor.visitorHash(), cursor, limit);
+    }
+
+    @GetMapping("/task-instances/{taskId}")
+    public Map<String, Object> task(@PathVariable String taskId, HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        return tasks.getOwned(taskId, visitor.visitorHash());
+    }
+
+    @PostMapping("/task-instances/{taskId}/runs")
+    public Map<String, Object> start(@PathVariable String taskId, HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        return sessions.createFromTask(taskId, visitor.visitorHash(), source(request));
+    }
+
+    @GetMapping("/runs/{runId}")
+    public Map<String, Object> run(@PathVariable String runId, HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        try { return sessions.mission(runId, visitor.visitorHash()); }
+        catch (DemoException error) { return castSnapshot(tasks.replay(runId, visitor.visitorHash())); }
+    }
+
+    @GetMapping("/runs/{runId}/replay")
+    public Map<String, Object> replay(@PathVariable String runId, HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        return tasks.replay(runId, visitor.visitorHash());
+    }
+
+    @GetMapping(value = "/runs/{runId}/events", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter events(@PathVariable String runId,
+                             @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
+                             HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        return sessions.events(runId, visitor.visitorHash(), lastEventId);
+    }
+
+    @PostMapping("/runs/{runId}/airspace-conflicts/{volumeId}/actions")
+    public Map<String, Object> airspaceAction(@PathVariable String runId, @PathVariable String volumeId,
+                                               @RequestBody AirspaceActionRequest body,
+                                               HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        return sessions.airspaceAction(runId, visitor.visitorHash(), volumeId, body.actionType());
+    }
+
+    @PostMapping("/runs/{runId}/rewind-checkpoints/{checkpointId}/restore")
+    public Map<String, Object> restoreCheckpoint(@PathVariable String runId, @PathVariable String checkpointId,
+                                                  @RequestBody RewindRequest body,
+                                                  HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        return sessions.restoreCheckpoint(runId, visitor.visitorHash(), checkpointId, body.rewindId(), body.expectedRevision());
+    }
+
+    @SuppressWarnings("unchecked") private static Map<String, Object> castSnapshot(Map<String, Object> replay) {
+        return (Map<String, Object>) replay.get("snapshot");
+    }
+    private static String source(HttpServletRequest request) {
+        String forwarded = request.getHeader("X-Forwarded-For");
+        return forwarded != null && !forwarded.isBlank() ? forwarded.split(",", 2)[0].trim() : request.getRemoteAddr();
+    }
+    public record GenerateRequest(String scenarioTemplateId, String seed, Map<String, Object> parameters) {}
+    public record AirspaceActionRequest(String actionType) {}
+    public record RewindRequest(String rewindId, long expectedRevision) {}
+}

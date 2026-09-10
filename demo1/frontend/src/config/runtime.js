@@ -1,4 +1,4 @@
-const raw = typeof window === 'undefined' ? {} : (window.__ZHIXUN_CONFIG__ || {})
+const raw = typeof window === 'undefined' ? {} : (window.__SKYFLEET_CONFIG__ || {})
 const devEnv = import.meta.env?.DEV ? import.meta.env : {}
 
 function trimTrailingSlash(value) {

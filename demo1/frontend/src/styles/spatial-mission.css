@@ -1,0 +1,9 @@
+.spatial-app { width:100%; height:100%; overflow:hidden; background:var(--world-void); }
+
+@media (max-width:1099px) {
+  .spatial-app { display:none; }
+}
+@media (max-height:700px) and (min-width:1100px) {
+  .fleet-dock { bottom:34px; }
+  .telemetry-stream { bottom:10px; }
+}
