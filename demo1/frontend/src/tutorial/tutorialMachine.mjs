@@ -52,7 +52,7 @@ export function tutorialReducer(state, event, steps = PROLOGUE_STEPS) {
     case 'RESUME': {
       const index = Math.max(0, steps.findIndex(step => step.id === event.stepId))
       const step = steps[index]
-      return createTutorialState({ stepIndex: index, phase: ['action', 'system'].includes(step?.mode) ? TUTORIAL_PHASES.ACTION : TUTORIAL_PHASES.DIALOGUE })
+      return createTutorialState({ stepIndex: index, phase: ['action', 'system'].includes(step?.mode) ? TUTORIAL_PHASES.ACTION : TUTORIAL_PHASES.DIALOGUE, waiting: step?.mode === 'system' })
     }
     case 'INTRO_FINISHED':
       return { ...state, phase: TUTORIAL_PHASES.DIALOGUE }
@@ -61,7 +61,7 @@ export function tutorialReducer(state, event, steps = PROLOGUE_STEPS) {
       return nextStepState(state, steps)
     case 'ACTION_READY':
       if (state.phase !== TUTORIAL_PHASES.TRANSITION_TO_ACTION) return state
-      return { ...state, phase: TUTORIAL_PHASES.ACTION }
+      return { ...state, phase: TUTORIAL_PHASES.ACTION, waiting: steps[state.stepIndex]?.mode === 'system' }
     case 'ACTION_WAIT':
       if (state.phase !== TUTORIAL_PHASES.ACTION) return state
       return { ...state, waiting: true }
@@ -99,7 +99,7 @@ export function tutorialReducer(state, event, steps = PROLOGUE_STEPS) {
 export function createProgressRecord(stepId, status = 'in_progress', now = Date.now(), chapterId = TUTORIAL_CHAPTER, context = {}) {
   const chapter = getTutorialChapter(chapterId)
   const optional = Object.fromEntries(
-    ['taskId', 'runId', 'redVolumeId', 'redDiamondId', 'pausedByTutorial', 'resumeTimeScale']
+    ['taskId', 'runId', 'redVolumeId', 'redDiamondId', 'rewindCheckpointId', 'redFineTransactionId', 'pausedByTutorial', 'resumeTimeScale']
       .filter(key => context[key] !== undefined && context[key] !== null && context[key] !== '')
       .map(key => [key, context[key]])
   )
@@ -119,17 +119,36 @@ export function parseProgressRecord(raw, chapterId = TUTORIAL_CHAPTER) {
   }
 }
 
-export function resolveResumeStep(record, { plannerOpen = false, fleetHubOpen = false, chapterId = TUTORIAL_CHAPTER, activeRunId = '' } = {}) {
+export function resolveResumeStep(record, {
+  plannerOpen = false,
+  fleetHubOpen = false,
+  chapterId = TUTORIAL_CHAPTER,
+  activeRunId = '',
+  rewindCheckpointRestored = false,
+  redDetourApplied = false,
+  redDiamondCollected = false
+} = {}) {
   if (!record || record.status !== 'in_progress') return null
   const chapter = getTutorialChapter(chapterId)
-  const exists = chapter.steps.some(step => step.id === record.stepId)
-  const stepId = exists ? record.stepId : chapter.steps[0].id
+  let requestedStepId = record.stepId
+  if (chapter.id === TUTORIAL_CHAPTER) {
+    const affectedByPrematureDetour = ['A05', 'A06-CONTINUE', 'D12', 'WAIT-RED-VIOLATION'].includes(requestedStepId)
+    if (redDiamondCollected && affectedByPrematureDetour) requestedStepId = 'D16-REWARD'
+    else if (redDetourApplied && affectedByPrematureDetour) requestedStepId = 'D15-DETOUR'
+    else if (rewindCheckpointRestored && ['A05', 'A06-CONTINUE', 'D12', 'WAIT-RED-VIOLATION', 'A07-CHECKPOINT', 'A08-RESTORE'].includes(requestedStepId)) requestedStepId = 'D14-RETRY'
+    else if (['A05', 'A06-CONTINUE'].includes(requestedStepId)) requestedStepId = 'D12'
+  }
+  const exists = chapter.steps.some(step => step.id === requestedStepId)
+  const stepId = exists ? requestedStepId : chapter.steps[0].id
   if (chapter.id === TUTORIAL_CHAPTER && stepId === 'A04' && record.runId) {
     if (String(record.runId) === String(activeRunId || '')) return stepId
     return activeRunId ? null : 'A01'
   }
   if (chapter.id === TUTORIAL_CHAPTER && RUN_DEPENDENT_STEPS.has(stepId)) {
-    if (record.runId && String(record.runId) === String(activeRunId || '')) return stepId
+    if (record.runId && String(record.runId) === String(activeRunId || '')) {
+      if (stepId === 'A08-RESTORE') return rewindCheckpointRestored ? 'D14-RETRY' : 'A07-CHECKPOINT'
+      return stepId
+    }
     return activeRunId ? null : 'A01'
   }
   if (chapter.id === TUTORIAL_CHAPTER && !plannerOpen && PLANNER_DEPENDENT_STEPS.has(stepId)) return 'A01'

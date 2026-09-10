@@ -98,6 +98,13 @@ function useLocalImage(event) {
 .tutorial-character.is-fleet.is-muted { opacity: .42; }
 .tutorial-character.is-fleet.is-action { opacity: .16; }
 
+.tutorial-character.is-action.is-speaking {
+  z-index: calc(var(--layer-tutorial) + 2);
+  filter: brightness(1) saturate(1);
+  opacity: 1;
+  transform: translateY(-6px) scale(1);
+}
+
 @media (max-width: 1450px) {
   .tutorial-character.is-planner.is-muted { opacity: .18; }
   .tutorial-character.is-fleet { bottom:clamp(374px,48.5vh,400px);width:clamp(190px,15vw,224px);height:clamp(265px,40vh,350px) }
@@ -108,5 +115,6 @@ function useLocalImage(event) {
   .tutorial-character { transition: opacity .12s linear, filter .12s linear; }
   .tutorial-character.is-speaking,
   .tutorial-character.is-action { transform: none; }
+  .tutorial-character.is-action.is-speaking { transform: none; }
 }
 </style>

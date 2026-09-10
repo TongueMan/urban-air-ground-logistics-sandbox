@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { snapTimelineProgress } from '../src/mission/presentation/timelineSnapping.mjs'
-import { resolveAirspaceActivation } from '../src/utils/airspaceVisibility.mjs'
+import { resolveAirspaceActivation, visibleAirspaceConflicts } from '../src/utils/airspaceVisibility.mjs'
 
 const api = readFileSync(new URL('../src/api/demo.js', import.meta.url), 'utf8')
 const planner = readFileSync(new URL('../src/components/mission/TaskPlanner.vue', import.meta.url), 'utf8')
@@ -43,6 +43,15 @@ test('timeline enters replay before the asynchronous pause so rapid scrubbing ca
   assert.ok(pauseAt > enterReplayAt, 'the replay cursor must be established before waiting for pause')
   assert.equal(previewAt.lastIndexOf('context.enterReplay(progress)'), enterReplayAt, 'a stale cursor must not be reapplied after pause')
   assert.match(previewAt, /if \(!wasReplaying\) context\.returnToLive\(\)/)
+})
+
+test('checkpoint restore refreshes the settled server revision before its first request', () => {
+  const restoreCheckpoint = missionRuntime.match(/async function restoreCheckpoint\(checkpointId\) \{[\s\S]*?\n  \}/)?.[0] || ''
+  const refreshAt = restoreCheckpoint.indexOf('await getMission(runId)')
+  const restoreAt = restoreCheckpoint.indexOf('await postRestoreRewindCheckpoint(runId')
+  assert.ok(refreshAt >= 0, 'restore should fetch the latest paused snapshot')
+  assert.ok(restoreAt > refreshAt, 'restore should use the settled revision after refresh')
+  assert.match(restoreCheckpoint, /expectedRevision: Number\(latestSnapshot\?\.revision \|\| 0\)/)
 })
 
 test('timeline scrubber snaps to decision checkpoints with hysteresis', () => {
@@ -121,6 +130,20 @@ test('static active airspace is visible at simulation zero while dynamic airspac
   assert.match(missionMap, /setViewport\(focusPoints, missionViewportOptions\(\)\)/)
   assert.match(missionMap, /AIRSPACE_LABEL_ALTITUDE_METERS = 12/)
   assert.match(missionMap, /CONFLICT_LABEL_ALTITUDE_METERS = 18/)
+})
+
+test('tutorial hides only the red conflict action before rewind', () => {
+  const conflicts = [
+    { id: 'C-RED', volumeId: 'V-RED', ruleType: 'ABSOLUTE_NO_FLY' },
+    { id: 'C-YELLOW', volumeId: 'V-YELLOW', ruleType: 'TEMPORARY_NO_FLY' },
+    { id: 'C-PURPLE', volumeId: 'V-PURPLE' }
+  ]
+  const volumes = [{ id: 'V-PURPLE', ruleType: 'ALTITUDE_CORRIDOR' }]
+  assert.deepEqual(visibleAirspaceConflicts(conflicts, volumes, false), conflicts)
+  assert.deepEqual(visibleAirspaceConflicts(conflicts, volumes, true).map(item => item.id), ['C-YELLOW', 'C-PURPLE'])
+  assert.match(missionWorldBridge, /tutorial-red-conflict-locked/)
+  assert.match(missionMap, /visibleAirspaceConflicts\(sourceConflicts, volumes, props\.tutorialRedConflictLocked\)/)
+  assert.match(missionRuntime, /tutorialRedConflictLocked\.value && isAbsoluteNoFlyVolume\(volumeId\)/)
 })
 
 test('device follow can return to the active delivery bounds instead of the fixed city overview', () => {

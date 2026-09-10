@@ -28,6 +28,9 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   const scenarioTemplates = ref([])
   const taskPreview = ref(null)
   const tutorialGenerationPreset = ref(null)
+  const tutorialRedConflictLocked = ref(false)
+  const tutorialRewindLocked = ref(false)
+  const tutorialMissionReactionsSuppressed = ref(false)
   const historyItems = ref([])
   const plannerOpen = ref(false)
   const historyOpen = ref(false)
@@ -90,7 +93,9 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     }
     if (type === 'airspace-warning') {
       latestAirspaceWarning.value = { ...delta.warning, receivedAt: Date.now() }
-      selectAirspace(delta.warning.volumeId)
+      if (!(tutorialRedConflictLocked.value && isAbsoluteNoFlyVolume(delta.warning.volumeId))) {
+        selectAirspace(delta.warning.volumeId)
+      }
       notice.value = delta.warning.message || '绝对禁飞区已进入处置范围。'
     }
   }
@@ -159,6 +164,7 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
       tutorialGenerationPreset.value = null
       selectedAirspaceId.value = ''
       lastAirspaceAction.value = null
+      lastRewindAck.value = null
       replayBundle.value = null
       context.returnToLive()
       connectEvents()
@@ -205,6 +211,31 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     tutorialGenerationPreset.value = seed ? Object.freeze({ seed }) : null
   }
   function clearTutorialGenerationPreset() { tutorialGenerationPreset.value = null }
+  function isAbsoluteNoFlyVolume(volumeId) {
+    const volumes = context.rawSnapshot.value?.mission?.airspace?.runtimeVolumes
+      || context.rawSnapshot.value?.mission?.airspace?.volumes
+      || []
+    return volumes.some(volume => (
+      String(volume.id || '') === String(volumeId || '')
+      && String(volume.ruleType || '') === 'ABSOLUTE_NO_FLY'
+    ))
+  }
+  function setTutorialRedConflictLocked(locked = true) {
+    tutorialRedConflictLocked.value = Boolean(locked)
+    if (tutorialRedConflictLocked.value && isAbsoluteNoFlyVolume(selectedAirspaceId.value)) {
+      selectedAirspaceId.value = ''
+    }
+  }
+  function clearTutorialRedConflictLocked() { tutorialRedConflictLocked.value = false }
+  function setTutorialRewindLocked(locked = true) {
+    tutorialRewindLocked.value = Boolean(locked)
+    if (tutorialRewindLocked.value && context.timeMode.value === 'REPLAY') context.returnToLive()
+  }
+  function clearTutorialRewindLocked() { tutorialRewindLocked.value = false }
+  function setTutorialMissionReactionsSuppressed(suppressed = true) {
+    tutorialMissionReactionsSuppressed.value = Boolean(suppressed)
+  }
+  function clearTutorialMissionReactionsSuppressed() { tutorialMissionReactionsSuppressed.value = false }
   function setMapFollowingDevice(deviceId = '') { mapFollowingDeviceId.value = String(deviceId || '') }
 
   async function startMission() {
@@ -280,13 +311,22 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   async function restoreCheckpoint(checkpointId) {
     if (!session.value?.id || !checkpointId) return null
     if (rewindBusy.value) return null
+    const runId = session.value.id
     rewindBusy.value = true
     rewindError.value = ''
+    lastRewindAck.value = null
     const rewindId = globalThis.crypto?.randomUUID?.() || `rewind-${Date.now()}-${Math.random().toString(16).slice(2)}`
     try {
-      const result = await postRestoreRewindCheckpoint(session.value.id, checkpointId, {
+      // Selecting a checkpoint pauses the run asynchronously. A final simulation
+      // delta can therefore arrive after the pause response and leave the local
+      // revision one step behind. Refresh immediately before the optimistic
+      // restore so the first confirmation click uses the server's settled
+      // revision instead of forcing the player to retry.
+      const latestSnapshot = await getMission(runId)
+      applySnapshot(latestSnapshot)
+      const result = await postRestoreRewindCheckpoint(runId, checkpointId, {
         rewindId,
-        expectedRevision: Number(context.rawSnapshot.value?.revision || 0)
+        expectedRevision: Number(latestSnapshot?.revision || 0)
       })
       replayBundle.value = null
       latestEconomyTransaction.value = null
@@ -320,6 +360,10 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     replayBundle.value = null
     selectedAirspaceId.value = ''
     lastAirspaceAction.value = null
+    lastRewindAck.value = null
+    clearTutorialRedConflictLocked()
+    clearTutorialRewindLocked()
+    clearTutorialMissionReactionsSuppressed()
     latestAirspaceWarning.value = null
     notice.value = ''
     context.ingestSnapshot(null)
@@ -392,8 +436,10 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   }
 
   function selectAirspace(volumeId) {
+    if (tutorialRedConflictLocked.value && isAbsoluteNoFlyVolume(volumeId)) return false
     context.closeActionMode()
     selectedAirspaceId.value = String(volumeId || '')
+    return true
   }
   function closeAirspace() { selectedAirspaceId.value = '' }
   async function executeAirspaceAction(volumeId, actionType) {
@@ -412,6 +458,9 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   function dispose() {
     eventSource?.close()
     stopFallbackPolling()
+    clearTutorialRedConflictLocked()
+    clearTutorialRewindLocked()
+    clearTutorialMissionReactionsSuppressed()
   }
 
   onBeforeUnmount(dispose)
@@ -442,6 +491,9 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     scenarioTemplates,
     taskPreview,
     tutorialGenerationPreset: readonly(tutorialGenerationPreset),
+    tutorialRedConflictLocked: readonly(tutorialRedConflictLocked),
+    tutorialRewindLocked: readonly(tutorialRewindLocked),
+    tutorialMissionReactionsSuppressed: readonly(tutorialMissionReactionsSuppressed),
     historyItems,
     plannerOpen,
     historyOpen,
@@ -464,6 +516,12 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     closeHistory,
     setTutorialGenerationPreset,
     clearTutorialGenerationPreset,
+    setTutorialRedConflictLocked,
+    clearTutorialRedConflictLocked,
+    setTutorialRewindLocked,
+    clearTutorialRewindLocked,
+    setTutorialMissionReactionsSuppressed,
+    clearTutorialMissionReactionsSuppressed,
     setMapFollowingDevice,
     refreshMission,
     startMission,

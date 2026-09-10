@@ -12,3 +12,12 @@ export function resolveAirspaceActivation(volume = {}, { planningPreview = false
   if (state === 'ACTIVATING') return Math.max(.05, ratio ?? .05)
   return ratio ?? (state === 'ACTIVE' ? 1 : 0)
 }
+
+export function visibleAirspaceConflicts(conflicts = [], volumes = [], tutorialRedConflictLocked = false) {
+  if (!tutorialRedConflictLocked) return conflicts
+  const rulesById = new Map(volumes.map(volume => [String(volume.id || ''), String(volume.ruleType || '')]))
+  return conflicts.filter(conflict => {
+    const ruleType = String(conflict.ruleType || rulesById.get(String(conflict.volumeId || '')) || '')
+    return ruleType !== 'ABSOLUTE_NO_FLY'
+  })
+}

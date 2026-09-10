@@ -14,6 +14,7 @@ import {
   TUTORIAL_PHASES
 } from './tutorialMachine.mjs'
 import {
+  AIRSPACE_PANEL_DEPENDENT_STEPS,
   FLEET_HUB_DEPENDENT_STEPS,
   FLEET_TUTORIAL_CHAPTER,
   PLANNER_DEPENDENT_STEPS,
@@ -32,6 +33,9 @@ const SUCCESS_RIPPLE = 420
 const DIALOGUE_TRANSITION = 180
 const COMPLETE_DURATION = 1500
 const TARGET_DELAY_NOTICE = 12000
+const RED_FINE_REACTION_DURATION = 3500
+const REWIND_INTERACTION_STEPS = new Set(['A07-CHECKPOINT', 'A08-RESTORE'])
+const PREMATURE_REWIND_RECOVERY_STEPS = new Set(['WAIT-RED-VIOLATION', 'D13-REWIND', 'A07-CHECKPOINT', 'A08-RESTORE'])
 
 export function useTutorialEngine(runtime, fleetRuntime) {
   const state = ref(createTutorialState())
@@ -49,6 +53,8 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   const generationFailed = ref(false)
   const startFailed = ref(false)
   const detourFailed = ref(false)
+  const redCourseFailed = ref(false)
+  const rewindFailed = ref(false)
   const chapterPreparing = ref(false)
   const manualAttentionSeen = ref(false)
   const progressContext = ref({})
@@ -66,6 +72,10 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   let detourActionStarted = false
   let pauseInFlight = false
   let detourCompletionInFlight = false
+  let redCourseInFlight = false
+  let redCourseObservationStarted = false
+  let redFinePauseInFlight = false
+  let rewindActionStarted = false
   let fleetRecoveryInFlight = false
 
   const phase = computed(() => state.value.phase)
@@ -120,14 +130,20 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     ? 'awkward'
     : currentStep.value?.expression)
   const effectiveText = computed(() => {
-    if (targetSyncDelayed.value && !targetElement.value) return '目标仍在同步，请稍候。界面准备好后会自动继续。'
+    if (targetSyncDelayed.value && !targetElement.value) {
+      if (REWIND_INTERACTION_STEPS.has(currentStep.value.id)) return '正在核对关键节点状态。界面准备好后会自动继续，不需要重复点击。'
+      return '目标仍在同步，请稍候。界面准备好后会自动继续。'
+    }
     if (generationFailed.value && currentStep.value.id === 'A03') return '方案没有通过这次校验。检查系统提示后，再点击一次生成本局任务。'
     if (startFailed.value && currentStep.value.id === 'A04') return '任务没有成功启动。保留当前方案，再点击一次“开始配送”即可重试。'
-    if (detourFailed.value && currentStep.value.id === 'A06') return '绕飞没有成功应用。查看系统提示后，再点击一次“从侧面绕飞”。'
+    if (redCourseFailed.value && currentStep.value.id === 'WAIT-RED-VIOLATION') return '任务暂时未能恢复，系统正在重试原航线观察。'
+    if (rewindFailed.value && currentStep.value.id === 'A08-RESTORE') return '回溯没有成功应用。黄色节点仍然保留，请再点击一次“回到这里重新选择”。'
+    if (detourFailed.value && currentStep.value.id === 'A09-DETOUR') return '绕飞没有成功应用。查看系统提示后，再点击一次“从侧面绕飞”。'
     if (state.value.wrongAttempts >= 3 && isActionMode.value) return '先点亮起的目标。其他操作等教程结束后再试。'
     if (state.value.waiting && currentStep.value.id === 'A03') return '正在生成与校验路线、配送点、奖励和四种空域…'
     if (state.value.waiting && currentStep.value.id === 'A04') return '正在启动真实配送任务并暂停仿真…'
-    if (state.value.waiting && currentStep.value.id === 'A06') return '正在应用绕飞航线…'
+    if (state.value.waiting && currentStep.value.id === 'A08-RESTORE') return '正在撤销黄色节点之后的错误分支并恢复任务状态…'
+    if (state.value.waiting && currentStep.value.id === 'A09-DETOUR') return '正在应用绕飞航线…'
     return currentStep.value?.text || ''
   })
 
@@ -204,6 +220,89 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     return Boolean(id && collected.map(String).includes(id))
   }
 
+  const RED_CONFLICT_UNLOCKED_STEPS = new Set([
+    'D14-RETRY', 'A09-DETOUR', 'D15-DETOUR', 'WAIT-DIAMOND',
+    'D16-REWARD', 'D17-BATTERY', 'D18-COMPLETE'
+  ])
+
+  function configureProloguePresentationGuards(stepId = currentStep.value?.id) {
+    runtime.setTutorialMissionReactionsSuppressed(true)
+    const conflictUnlocked = RED_CONFLICT_UNLOCKED_STEPS.has(String(stepId || ''))
+    runtime.setTutorialRedConflictLocked(!conflictUnlocked)
+    if (!conflictUnlocked) runtime.closeAirspace()
+    // A07 itself unlocks only once its instruction is visible. Preserve that
+    // selection through A07 success and the A08 transition so the real restore
+    // button remains available, then lock the timeline again at D14.
+    const step = String(stepId || '')
+    const rewindUnlocked = (
+      step === 'A07-CHECKPOINT'
+      && [TUTORIAL_PHASES.ACTION, TUTORIAL_PHASES.ACTION_SUCCESS].includes(phase.value)
+    ) || (
+      step === 'A08-RESTORE'
+      && [TUTORIAL_PHASES.TRANSITION_TO_ACTION, TUTORIAL_PHASES.ACTION, TUTORIAL_PHASES.ACTION_SUCCESS].includes(phase.value)
+    )
+    runtime.setTutorialRewindLocked(!rewindUnlocked)
+  }
+
+  function redFineTransaction() {
+    const redVolumeId = String(progressContext.value.redVolumeId || '')
+    if (!redVolumeId) return null
+    const transactions = activeMission()?.economy?.recentTransactions || []
+    const current = [...transactions].reverse().find(transaction => (
+      transaction.entryType === 'AIRSPACE_FINE'
+      && String(transaction.referenceId || '') === redVolumeId
+    ))
+    const latest = runtime.latestEconomyTransaction?.value
+    if (current) return current
+    return latest?.entryType === 'AIRSPACE_FINE' && String(latest.referenceId || '') === redVolumeId
+      ? latest
+      : null
+  }
+
+  function latestRedCheckpoint() {
+    const timeline = activeMission()?.timeline || {}
+    const checkpoints = Array.isArray(timeline.checkpoints) ? timeline.checkpoints : []
+    const redVolumeId = String(progressContext.value.redVolumeId || '')
+    const latestId = String(timeline.latestCheckpointId || '')
+    return checkpoints.find(checkpoint => (
+      checkpoint.available
+      && String(checkpoint.id || '') === latestId
+      && String(checkpoint.volumeId || '') === redVolumeId
+    )) || [...checkpoints].reverse().find(checkpoint => (
+      checkpoint.available && String(checkpoint.volumeId || '') === redVolumeId
+    )) || null
+  }
+
+  function restoredRedCheckpoint(record = progressContext.value) {
+    const checkpoints = activeMission()?.timeline?.checkpoints || []
+    const checkpointId = String(record?.rewindCheckpointId || '')
+    const redVolumeId = String(record?.redVolumeId || '')
+    return [...checkpoints].reverse().find(checkpoint => (
+      String(checkpoint.status || '') === 'USED'
+      && (
+        (checkpointId && String(checkpoint.id || '') === checkpointId)
+        || (redVolumeId && String(checkpoint.volumeId || '') === redVolumeId)
+      )
+    )) || null
+  }
+
+  function progressCheckpointRestored(record) {
+    return Boolean(restoredRedCheckpoint(record))
+  }
+
+  function progressRedDetourApplied(record) {
+    const redVolumeId = String(record?.redVolumeId || '')
+    const volumes = activeMission()?.airspace?.runtimeVolumes || activeMission()?.airspace?.volumes || []
+    const action = volumes.find(volume => String(volume.id || '') === redVolumeId)?.selectedAction
+    return Boolean(action?.actionType === 'DETOUR' && action?.status === 'APPLIED')
+  }
+
+  function progressRedDiamondCollected(record) {
+    const diamondId = String(record?.redDiamondId || '')
+    const collected = activeMission()?.economy?.collectedDiamondIds || []
+    return Boolean(diamondId && collected.map(String).includes(diamondId))
+  }
+
   async function releaseTutorialPause() {
     if (!progressContext.value.pausedByTutorial) return false
     const matches = tutorialRunMatches()
@@ -248,12 +347,25 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       generationFailed.value = false
       startFailed.value = false
       detourFailed.value = false
+      redCourseFailed.value = false
+      rewindFailed.value = false
       progressContext.value = {}
       generationStarted = false
       startActionStarted = false
       detourActionStarted = false
-      if (chapterId === TUTORIAL_CHAPTER) runtime.setTutorialGenerationPreset({ seed: PROLOGUE_TUTORIAL_SEED })
-      else runtime.clearTutorialGenerationPreset()
+      redCourseInFlight = false
+      redCourseObservationStarted = false
+      redFinePauseInFlight = false
+      rewindActionStarted = false
+      if (chapterId === TUTORIAL_CHAPTER) {
+        runtime.setTutorialGenerationPreset({ seed: PROLOGUE_TUTORIAL_SEED })
+        configureProloguePresentationGuards(getTutorialChapter(chapterId).steps[0].id)
+      } else {
+        runtime.clearTutorialGenerationPreset()
+        runtime.clearTutorialRedConflictLocked()
+        runtime.clearTutorialRewindLocked()
+        runtime.clearTutorialMissionReactionsSuppressed()
+      }
       activeChapterId.value = chapterId
       selectedChapterId.value = chapterId
       manualExpanded.value = false
@@ -282,6 +394,9 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     const finishedChapterId = activeChapterId.value
     clearTransitionTimer()
     runtime.clearTutorialGenerationPreset()
+    runtime.clearTutorialRedConflictLocked()
+    runtime.clearTutorialRewindLocked()
+    runtime.clearTutorialMissionReactionsSuppressed()
     dispatch({ type: 'CLOSE' })
     activeChapterId.value = ''
     if (promptNext) promptNextChapter(finishedChapterId)
@@ -294,6 +409,9 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       if (activeChapterId.value === TUTORIAL_CHAPTER) closeActiveChapter()
       else {
         runtime.clearTutorialGenerationPreset()
+        runtime.clearTutorialRedConflictLocked()
+        runtime.clearTutorialRewindLocked()
+        runtime.clearTutorialMissionReactionsSuppressed()
         manualExpanded.value = false
       }
       runtime.closePlanner()
@@ -325,7 +443,12 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     const active = activeChapterId.value === chapter.id && isActive.value
     recordProgress(chapter.id, 'skipped', active ? currentStep.value.id : chapter.steps[0].id)
     if (active && chapter.id === TUTORIAL_CHAPTER) await releaseTutorialPause()
-    if (chapter.id === TUTORIAL_CHAPTER) runtime.clearTutorialGenerationPreset()
+    if (chapter.id === TUTORIAL_CHAPTER) {
+      runtime.clearTutorialGenerationPreset()
+      runtime.clearTutorialRedConflictLocked()
+      runtime.clearTutorialRewindLocked()
+      runtime.clearTutorialMissionReactionsSuppressed()
+    }
     if (active) closeActiveChapter({ promptNext: chapter.id === TUTORIAL_CHAPTER })
     else if (chapter.id === TUTORIAL_CHAPTER) promptNextChapter(chapter.id)
     else manualExpanded.value = false
@@ -452,13 +575,17 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       }, 0)
       return
     }
-    if (currentStep.value.id === 'A05') {
-      window.setTimeout(() => {
-        if (String(runtime.selectedAirspaceId.value || '') === String(progressContext.value.redVolumeId || '')) completeAction()
-      }, 0)
+    if (currentStep.value.id === 'A07-CHECKPOINT') {
+      completeCheckpointPreview(event)
       return
     }
-    if (currentStep.value.id === 'A06' && !runtime.airspaceActionBusy.value && !state.value.waiting) {
+    if (currentStep.value.id === 'A08-RESTORE' && !runtime.rewindBusy.value && !state.value.waiting) {
+      rewindFailed.value = false
+      rewindActionStarted = true
+      dispatch({ type: 'ACTION_WAIT' })
+      return
+    }
+    if (currentStep.value.id === 'A09-DETOUR' && !runtime.airspaceActionBusy.value && !state.value.waiting) {
       detourFailed.value = false
       detourActionStarted = true
       dispatch({ type: 'ACTION_WAIT' })
@@ -587,9 +714,11 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ['class', 'style', 'disabled']
+      attributeFilter: ['class', 'style', 'disabled', 'data-tutorial-id']
     })
     targetDelayTimer = window.setTimeout(() => {
+      if (normalizeTimelineTutorialState()) return
+      refreshTarget()
       if (!targetElement.value) targetSyncDelayed.value = true
     }, TARGET_DELAY_NOTICE)
   }
@@ -599,12 +728,21 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     selectedChapterId.value = chapterId
     manualExpanded.value = false
     progressContext.value = chapterId === TUTORIAL_CHAPTER
-      ? Object.fromEntries(['taskId', 'runId', 'redVolumeId', 'redDiamondId', 'pausedByTutorial', 'resumeTimeScale']
+      ? Object.fromEntries(['taskId', 'runId', 'redVolumeId', 'redDiamondId', 'rewindCheckpointId', 'redFineTransactionId', 'pausedByTutorial', 'resumeTimeScale']
         .filter(key => record?.[key] !== undefined)
         .map(key => [key, record[key]]))
       : {}
     if (chapterId === TUTORIAL_CHAPTER && !record?.runId) {
       runtime.setTutorialGenerationPreset({ seed: PROLOGUE_TUTORIAL_SEED })
+    }
+    if (chapterId === TUTORIAL_CHAPTER) configureProloguePresentationGuards(stepId)
+    else {
+      runtime.clearTutorialRedConflictLocked()
+      runtime.clearTutorialRewindLocked()
+      runtime.clearTutorialMissionReactionsSuppressed()
+    }
+    if (chapterId === TUTORIAL_CHAPTER && record?.redVolumeId && AIRSPACE_PANEL_DEPENDENT_STEPS.has(stepId)) {
+      runtime.selectAirspace(record.redVolumeId)
     }
     dispatch({ type: 'RESUME', stepId })
     recordProgress(chapterId, 'in_progress', stepId)
@@ -641,7 +779,10 @@ export function useTutorialEngine(runtime, fleetRuntime) {
         plannerOpen: runtime.plannerOpen.value,
         fleetHubOpen: fleetRuntime?.isOpen.value,
         chapterId: chapter.id,
-        activeRunId: activeRunId()
+        activeRunId: activeRunId(),
+        rewindCheckpointRestored: progressCheckpointRestored(records[chapter.id]),
+        redDetourApplied: progressRedDetourApplied(records[chapter.id]),
+        redDiamondCollected: progressRedDiamondCollected(records[chapter.id])
       }))
     })
     if (resumable && canReplayTutorial({
@@ -654,7 +795,10 @@ export function useTutorialEngine(runtime, fleetRuntime) {
         plannerOpen: runtime.plannerOpen.value,
         fleetHubOpen: fleetRuntime?.isOpen.value,
         chapterId: resumable.id,
-        activeRunId: activeRunId()
+        activeRunId: activeRunId(),
+        rewindCheckpointRestored: progressCheckpointRestored(records[resumable.id]),
+        redDetourApplied: progressRedDetourApplied(records[resumable.id]),
+        redDiamondCollected: progressRedDiamondCollected(records[resumable.id])
       })
       resumeChapter(resumable.id, stepId, records[resumable.id])
       return
@@ -709,15 +853,135 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     }
   }
 
+  async function beginRedCourseObservation() {
+    if (redCourseInFlight || redCourseObservationStarted || currentStep.value.id !== 'WAIT-RED-VIOLATION'
+      || phase.value !== TUTORIAL_PHASES.ACTION || !tutorialRunMatches()) return
+    if (redFineTransaction() && latestRedCheckpoint()) return
+    redCourseInFlight = true
+    redCourseObservationStarted = true
+    redCourseFailed.value = false
+    try {
+      if (runtime.context?.timeMode.value === 'REPLAY') runtime.context.returnToLive()
+      const released = progressContext.value.pausedByTutorial
+        ? await releaseTutorialPause()
+        : (Number(runtime.timeScale.value) > 0
+            || await runtime.resumeMission(Number(progressContext.value.resumeTimeScale) || Number(runtime.lastActiveTimeScale.value) || 1))
+      if (!released) {
+        redCourseFailed.value = true
+        redCourseObservationStarted = false
+        window.setTimeout(evaluateCurrentCondition, 1200)
+        return
+      }
+    } finally {
+      redCourseInFlight = false
+    }
+  }
+
+  async function completeRedViolationWait() {
+    if (redFinePauseInFlight || currentStep.value.id !== 'WAIT-RED-VIOLATION'
+      || phase.value !== TUTORIAL_PHASES.ACTION || !tutorialRunMatches()) return
+    const fine = redFineTransaction()
+    const checkpoint = latestRedCheckpoint()
+    if (!fine || !checkpoint) return
+
+    redFinePauseInFlight = true
+    try {
+      const alreadyOwned = progressContext.value.pausedByTutorial === true && Number(runtime.timeScale.value) === 0
+      const wasMoving = runtime.session.value?.status === 'RUNNING' && Number(runtime.timeScale.value) > 0
+      const resumeTimeScale = Number(runtime.timeScale.value) || Number(runtime.lastActiveTimeScale.value) || Number(progressContext.value.resumeTimeScale) || 1
+      if (wasMoving && !(await runtime.pauseMission())) return
+      updateProgressContext({
+        rewindCheckpointId: String(checkpoint.id || ''),
+        redFineTransactionId: String(fine.id || fine.entryKey || ''),
+        pausedByTutorial: alreadyOwned || wasMoving,
+        resumeTimeScale
+      })
+      dispatch({ type: 'ACTION_WAIT' })
+      await new Promise(resolve => window.setTimeout(resolve, RED_FINE_REACTION_DURATION))
+      if (currentStep.value.id === 'WAIT-RED-VIOLATION' && phase.value === TUTORIAL_PHASES.ACTION) completeAction()
+    } finally {
+      redFinePauseInFlight = false
+    }
+  }
+
+  function completeCheckpointPreview(event) {
+    const checkpointElement = event?.target instanceof Element
+      ? event.target.closest('[data-checkpoint-id]')
+      : null
+    const checkpointId = String(checkpointElement?.dataset?.checkpointId || '')
+    const volumeId = String(checkpointElement?.dataset?.checkpointVolumeId || '')
+    const checkpoint = latestRedCheckpoint()
+    if (!checkpointId || checkpointId !== String(checkpoint?.id || '')
+      || volumeId !== String(progressContext.value.redVolumeId || '')) {
+      registerWrongInteraction()
+      return
+    }
+    updateProgressContext({ rewindCheckpointId: checkpointId })
+    window.setTimeout(() => {
+      if (runtime.context?.timeMode.value === 'REPLAY') completeAction()
+      else registerWrongInteraction()
+    }, 0)
+  }
+
+  function recoverPrematureCheckpointRestore() {
+    if (activeChapterId.value !== TUTORIAL_CHAPTER
+      || !PREMATURE_REWIND_RECOVERY_STEPS.has(currentStep.value.id)
+      || !tutorialRunMatches()) return false
+    const checkpoint = restoredRedCheckpoint()
+    if (!checkpoint) return false
+    clearTransitionTimer()
+    updateProgressContext({ rewindCheckpointId: String(checkpoint.id || progressContext.value.rewindCheckpointId || '') }, false)
+    runtime.clearTutorialRedConflictLocked()
+    runtime.setTutorialRewindLocked(true)
+    runtime.context.returnToLive()
+    runtime.selectAirspace(progressContext.value.redVolumeId)
+    dispatch({ type: 'RESUME', stepId: 'D14-RETRY' })
+    recordProgress(TUTORIAL_CHAPTER, 'in_progress', 'D14-RETRY')
+    return true
+  }
+
+  function completeAlreadyPreviewedCheckpoint() {
+    if (currentStep.value.id !== 'A07-CHECKPOINT' || phase.value !== TUTORIAL_PHASES.ACTION) return false
+    const checkpoint = latestRedCheckpoint()
+    if (!checkpoint || runtime.context?.timeMode.value !== 'REPLAY') return false
+    const cursor = Number(runtime.context?.timeCursor.value || 0)
+    if (Math.abs(cursor - Number(checkpoint.progress || 0)) > 0.35) return false
+    updateProgressContext({ rewindCheckpointId: String(checkpoint.id || '') })
+    completeAction()
+    return true
+  }
+
+  function normalizeTimelineTutorialState() {
+    if (recoverPrematureCheckpointRestore()) return true
+    if (completeAlreadyPreviewedCheckpoint()) return true
+    if (currentStep.value.id === 'WAIT-RED-VIOLATION' && runtime.context?.timeMode.value === 'REPLAY') {
+      runtime.context.returnToLive()
+      nextTick(evaluateCurrentCondition)
+      return true
+    }
+    return false
+  }
+
+  function completeRewindAction(ack = runtime.lastRewindAck?.value) {
+    if (currentStep.value.id !== 'A08-RESTORE' || phase.value !== TUTORIAL_PHASES.ACTION
+      || !tutorialRunMatches() || !ack?.rewindId) return false
+    if (String(ack.id || '') !== String(progressContext.value.rewindCheckpointId || '')
+      || String(ack.volumeId || '') !== String(progressContext.value.redVolumeId || '')) return false
+    rewindFailed.value = false
+    runtime.clearTutorialRedConflictLocked()
+    completeAction()
+    return true
+  }
+
   async function completeDetourAction(action = selectedRedAction()) {
-    if (detourCompletionInFlight || currentStep.value.id !== 'A06'
+    if (detourCompletionInFlight || currentStep.value.id !== 'A09-DETOUR'
       || phase.value !== TUTORIAL_PHASES.ACTION || !tutorialRunMatches()) return
     if (String(action?.volumeId || '') !== String(progressContext.value.redVolumeId || '')
       || String(action?.runId || '') !== activeRunId()
       || action?.actionType !== 'DETOUR' || action?.status !== 'APPLIED') return
     detourCompletionInFlight = true
     try {
-      const released = await releaseTutorialPause()
+      const released = progressContext.value.pausedByTutorial ? await releaseTutorialPause() : true
       if (!released) {
         detourFailed.value = true
         dispatch({ type: 'ACTION_RETRY' })
@@ -731,6 +995,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
 
   function evaluateCurrentCondition() {
     if (phase.value !== TUTORIAL_PHASES.ACTION || activeChapterId.value !== TUTORIAL_CHAPTER) return
+    if (normalizeTimelineTutorialState()) return
     if (currentStep.value.id === 'A02') {
       const checked = document.querySelector('[data-tutorial-id="mission-zone-count-four"] input[type="radio"]')?.checked
       if (checked) completeAction()
@@ -740,9 +1005,12 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       if (runtime.mapFollowingDeviceId.value) completeAction()
     } else if (currentStep.value.id === 'A04-OVERVIEW') {
       if (!runtime.mapFollowingDeviceId.value) completeAction()
-    } else if (currentStep.value.id === 'A05') {
-      if (String(runtime.selectedAirspaceId.value || '') === String(progressContext.value.redVolumeId || '')) completeAction()
-    } else if (currentStep.value.id === 'A06') {
+    } else if (currentStep.value.id === 'WAIT-RED-VIOLATION') {
+      if (redFineTransaction() && latestRedCheckpoint()) void completeRedViolationWait()
+      else void beginRedCourseObservation()
+    } else if (currentStep.value.id === 'A08-RESTORE') {
+      completeRewindAction()
+    } else if (currentStep.value.id === 'A09-DETOUR') {
       void completeDetourAction()
     } else if (currentStep.value.id === 'WAIT-DIAMOND' && redDiamondCollected()) {
       completeAction()
@@ -751,12 +1019,17 @@ export function useTutorialEngine(runtime, fleetRuntime) {
 
   watch(() => runtime.initialized.value, hydrateProgress, { immediate: true })
   watch(() => [activeChapterId.value, currentStep.value.id, phase.value], () => {
+    if (activeChapterId.value === TUTORIAL_CHAPTER && isActive.value) {
+      configureProloguePresentationGuards(currentStep.value.id)
+    }
     if (isActive.value && ![TUTORIAL_PHASES.INTRO, TUTORIAL_PHASES.COMPLETE].includes(phase.value)) {
       recordProgress(activeChapterId.value, 'in_progress', currentStep.value.id)
     }
     observeTarget()
     startTypewriter()
-    nextTick(evaluateCurrentCondition)
+    nextTick(() => {
+      if (!normalizeTimelineTutorialState()) evaluateCurrentCondition()
+    })
     if (phase.value === TUTORIAL_PHASES.COMPLETE && activeChapterId.value) {
       const chapterId = activeChapterId.value
       if (chapterId === TUTORIAL_CHAPTER) void releaseTutorialPause()
@@ -825,11 +1098,41 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   watch(() => runtime.selectedAirspaceId.value, evaluateCurrentCondition, { flush: 'post' })
   watch(() => runtime.mapFollowingDeviceId.value, evaluateCurrentCondition, { flush: 'post' })
   watch([
+    () => runtime.latestEconomyTransaction?.value?.id,
+    () => activeMission()?.economy?.recentTransactions?.length,
+    () => activeMission()?.timeline?.latestCheckpointId,
+    () => (activeMission()?.timeline?.checkpoints || []).map(checkpoint => `${checkpoint.id}:${checkpoint.status}`).join('|'),
+    () => runtime.context?.timeMode.value,
+    () => runtime.context?.timeCursor.value,
+    () => runtime.timeScale.value
+  ], evaluateCurrentCondition, { flush: 'post' })
+  watch([
+    () => runtime.rewindBusy.value,
+    () => runtime.lastRewindAck?.value?.rewindId,
+    () => runtime.rewindError.value
+  ], ([busy]) => {
+    if (currentStep.value.id !== 'A08-RESTORE' || phase.value !== TUTORIAL_PHASES.ACTION || !state.value.waiting) return
+    if (busy) {
+      rewindActionStarted = true
+      return
+    }
+    if (!rewindActionStarted) return
+    if (completeRewindAction()) {
+      rewindActionStarted = false
+      return
+    }
+    if (runtime.rewindError.value) {
+      rewindFailed.value = true
+      rewindActionStarted = false
+      dispatch({ type: 'ACTION_RETRY' })
+    }
+  }, { flush: 'post' })
+  watch([
     () => runtime.airspaceActionBusy.value,
     () => runtime.lastAirspaceAction?.value?.id,
     () => selectedRedAction()?.id
   ], ([busy]) => {
-    if (currentStep.value.id !== 'A06' || phase.value !== TUTORIAL_PHASES.ACTION) return
+    if (currentStep.value.id !== 'A09-DETOUR' || phase.value !== TUTORIAL_PHASES.ACTION) return
     if (busy) return
     const action = runtime.lastAirspaceAction?.value || selectedRedAction()
     if (action?.actionType === 'DETOUR' && action?.status === 'APPLIED') {
@@ -873,6 +1176,9 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   onBeforeUnmount(() => {
     void releaseTutorialPause()
     runtime.clearTutorialGenerationPreset()
+    runtime.clearTutorialRedConflictLocked()
+    runtime.clearTutorialRewindLocked()
+    runtime.clearTutorialMissionReactionsSuppressed()
     clearTransitionTimer()
     if (typewriterTimer) window.clearInterval(typewriterTimer)
     if (targetDelayTimer) window.clearTimeout(targetDelayTimer)

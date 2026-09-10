@@ -44,7 +44,7 @@ import { createBaiduCyberProvider } from '../config/baiduCyberMap'
 import { ACTIVE_MODEL_ROLES, getModelAsset, mapPresentationForAsset } from '../config/modelAssets.mjs'
 import { centerSceneForTransform } from '../utils/modelSceneTransforms.mjs'
 import { missionOverviewCamera, missionViewportOptions, plannerAwareViewportPoints } from '../utils/missionViewport.mjs'
-import { resolveAirspaceActivation } from '../utils/airspaceVisibility.mjs'
+import { resolveAirspaceActivation, visibleAirspaceConflicts } from '../utils/airspaceVisibility.mjs'
 import {
   adjustFollowZoomScale,
   createPolylineSampler,
@@ -71,6 +71,7 @@ const props = defineProps({
   timeCursor: { type: Number, default: 100 },
   timeMode: { type: String, default: 'LIVE' },
   planningPreview: { type: Boolean, default: false },
+  tutorialRedConflictLocked: { type: Boolean, default: false },
   modelAssignments: { type: Object, default: () => ({}) }
 })
 const emit = defineEmits(['select', 'select-airspace', 'follow-change'])
@@ -1300,7 +1301,8 @@ function updateAirspaceVisuals() {
   const labelSignature = visibleVolumes.map(volume => `${volume.id}:${volume.state}:${volume.threatLevel}:${volume.planningPreview}:${volume.ceilingMeters}:${volume.corridorFloorMeters}:${volume.corridorCeilingMeters}:${Math.round(Number(volume.currentAltitudeMeters || 0))}:${volume.targetAltitudeMeters}`).join('|')
   if (airspaceLabelLayer && labelSignature !== airspaceLabelSignature) { airspaceLabelLayer.dataSource = airspaceLabelSource(visibleVolumes); airspaceLabelSignature = labelSignature }
   if (airspaceLabelLayer) airspaceLabelLayer.visible = layers.airspace && visibleVolumes.length > 0
-  const conflicts = Array.isArray(props.mission?.airspace?.conflicts) ? props.mission.airspace.conflicts : []
+  const sourceConflicts = Array.isArray(props.mission?.airspace?.conflicts) ? props.mission.airspace.conflicts : []
+  const conflicts = visibleAirspaceConflicts(sourceConflicts, volumes, props.tutorialRedConflictLocked)
   const nextConflictSignature = conflicts.map(conflict => `${conflict.id}:${conflict.distanceMeters}:${conflict.estimatedEntrySeconds}:${conflict.threatLevel}`).join('|')
   if (conflictLabelLayer && nextConflictSignature !== conflictLabelSignature) { conflictLabelLayer.dataSource = conflictLabelSource(conflicts); conflictLabelSignature = nextConflictSignature }
   if (conflictLabelLayer) conflictLabelLayer.visible = layers.airspace && conflicts.length > 0
@@ -1628,7 +1630,7 @@ function onFollowWheel(event) {
   engine?.requestRender()
 }
 function onKeydown(event) { if (event.key === 'Escape' && followingId.value) leaveFollow() }
-watch([() => props.devices, () => props.mission, () => props.selectedId, () => props.selectedAirspaceId, layers, replayPercent], updateRoutes, { deep: true })
+watch([() => props.devices, () => props.mission, () => props.selectedId, () => props.selectedAirspaceId, () => props.tutorialRedConflictLocked, layers, replayPercent], updateRoutes, { deep: true })
 watch(() => props.modelAssignments, () => { refreshAssignedModels() }, { deep: true })
 watch(() => props.mission?.taskId || props.mission?.scenarioTemplateId || props.mission?.simulationId, () => { fitted = false; updateRoutes() })
 watch(followingId, deviceId => emit('follow-change', String(deviceId || '')), { immediate: true })

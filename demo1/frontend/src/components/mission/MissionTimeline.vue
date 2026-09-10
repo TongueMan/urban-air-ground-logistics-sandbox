@@ -1,5 +1,5 @@
 <template>
-  <section v-if="visible" class="mission-timeline" :class="{ 'is-previewing': previewing, 'is-paused': paused }" aria-label="任务时间轴">
+  <section v-if="visible" class="mission-timeline" :class="{ 'is-previewing': previewing, 'is-paused': paused, 'is-rewind-locked': rewindLocked }" data-tutorial-id="mission-timeline" aria-label="任务时间轴">
     <div class="timeline-status">
       <span class="instrument-kicker">TIME CONTROL</span>
       <b>{{ statusText }}</b>
@@ -26,6 +26,10 @@
           :style="{ left: `${markerPosition(checkpoint)}%` }"
           :title="checkpointTitle(checkpoint)"
           :aria-label="checkpointTitle(checkpoint)"
+          :disabled="rewindLocked"
+          :data-checkpoint-id="checkpoint.id"
+          :data-checkpoint-volume-id="checkpoint.volumeId"
+          :data-tutorial-id="!rewindLocked && checkpoint.available && checkpoint.id === latestCheckpoint?.id ? 'mission-rewind-checkpoint' : undefined"
           @click="selectCheckpoint(checkpoint)"
         ></button>
         <input
@@ -35,16 +39,17 @@
           :max="Math.max(0.1, liveProgress)"
           step="0.1"
           aria-label="查看历史任务进度"
+          :disabled="rewindLocked"
           @input="scrub"
         >
       </div>
     </div>
 
-    <button class="secondary-button" type="button" :class="{ active: replayPlaying }" :disabled="runtime.timeControlBusy.value" @click="toggleReplay">
+    <button class="secondary-button" type="button" :class="{ active: replayPlaying }" :disabled="runtime.timeControlBusy.value || rewindLocked" @click="toggleReplay">
       {{ replayPlaying ? '停止回看' : '回看播放' }}
     </button>
     <button v-if="previewing" class="secondary-button" type="button" @click="returnToLive">返回当前</button>
-    <button v-if="canRestore" class="rewind-button" type="button" :disabled="runtime.rewindBusy.value" @click="restoreSelected">
+    <button v-if="canRestore" class="rewind-button" type="button" data-tutorial-id="mission-rewind-restore" :disabled="runtime.rewindBusy.value || rewindLocked" @click="restoreSelected">
       {{ runtime.rewindBusy.value ? '正在回溯…' : '回到这里重新选择' }}
     </button>
   </section>
@@ -72,6 +77,7 @@ const visible = computed(() => Boolean(session.value?.id) && !runtime.plannerOpe
 const running = computed(() => session.value?.status === 'RUNNING')
 const paused = computed(() => running.value && Number(runtime.timeScale.value) === 0)
 const previewing = computed(() => context.timeMode.value === 'REPLAY')
+const rewindLocked = computed(() => Boolean(runtime.tutorialRewindLocked?.value))
 const liveProgress = computed(() => Math.max(0, Math.min(100, Number(rawTimeline.value.liveProgress ?? liveMission.value.progress ?? 0))))
 const cursor = computed(() => previewing.value ? Math.min(liveProgress.value, Number(context.timeCursor.value || 0)) : liveProgress.value)
 const liveTimeMs = computed(() => Math.max(0, Number(rawTimeline.value.liveSimulationTimeMs ?? session.value?.simulationElapsedMs ?? 0)))
@@ -99,6 +105,7 @@ async function toggleMission() {
 }
 
 async function scrub(event) {
+  if (rewindLocked.value) return
   const snap = snapTimelineProgress(event.target.value, checkpoints.value, {
     liveProgress: liveProgress.value,
     activeCheckpointId: snappedCheckpointId.value
@@ -115,6 +122,7 @@ async function scrub(event) {
 }
 
 async function selectCheckpoint(checkpoint) {
+  if (rewindLocked.value) return
   stopReplay()
   snappedCheckpointId.value = String(checkpoint.id || '')
   selectedCheckpointId.value = checkpoint.available ? checkpoint.id : ''
@@ -122,6 +130,7 @@ async function selectCheckpoint(checkpoint) {
 }
 
 async function toggleReplay() {
+  if (rewindLocked.value) return
   if (replayPlaying.value) { stopReplay(); return }
   if (!previewing.value || cursor.value >= liveProgress.value - 0.05) {
     if (await runtime.previewAt(0)) startReplay()
@@ -162,7 +171,7 @@ function returnToLive() {
 }
 
 async function restoreSelected() {
-  if (!canRestore.value) return
+  if (rewindLocked.value || !canRestore.value) return
   stopReplay()
   try {
     await runtime.restoreCheckpoint(selectedCheckpointId.value)
@@ -174,6 +183,7 @@ function markerPosition(checkpoint) {
   return liveProgress.value > 0 ? Math.max(0, Math.min(100, Number(checkpoint.progress || 0) / liveProgress.value * 100)) : 0
 }
 function checkpointTitle(checkpoint) {
+  if (rewindLocked.value) return '关键节点将在教程提示后解锁'
   const state = checkpoint.available ? '可回溯' : checkpoint.status === 'USED' ? '已使用' : '已超过'
   return `${checkpoint.volumeId || '空域决策'} · ${Number(checkpoint.progress || 0).toFixed(1)}% · ${state}`
 }
@@ -190,6 +200,7 @@ onBeforeUnmount(stopReplay)
 <style scoped>
 .mission-timeline{position:absolute;left:50%;bottom:18px;z-index:var(--layer-action);display:flex;align-items:center;gap:9px;width:min(920px,calc(100vw - 390px));min-height:52px;box-sizing:border-box;padding:8px 10px;border:1px solid rgba(83,221,255,.28);border-left:2px solid var(--signal-primary);color:var(--text-primary);background:linear-gradient(90deg,rgba(2,14,23,.95),rgba(5,25,35,.92));box-shadow:0 16px 42px rgba(0,0,0,.38);pointer-events:auto;transform:translateX(-50%);backdrop-filter:blur(12px)}
 .mission-timeline.is-previewing{border-left-color:#b48cff}.mission-timeline.is-paused{box-shadow:0 16px 42px rgba(0,0,0,.38),inset 0 0 28px rgba(255,196,91,.04)}
+.mission-timeline.is-rewind-locked .timeline-track input{cursor:not-allowed;opacity:.38}.mission-timeline.is-rewind-locked .checkpoint-marker{filter:saturate(.35);opacity:.38;cursor:not-allowed}
 .timeline-status{display:grid;gap:2px;min-width:90px}.timeline-status b{color:var(--text-secondary);font-size:.67rem;white-space:nowrap}.transport-button,.secondary-button,.rewind-button{min-height:32px;padding:0 10px;border:1px solid rgba(112,207,228,.28);color:#dffaff;background:rgba(10,43,57,.74);font-size:.66rem;white-space:nowrap}.transport-button{border-color:rgba(83,221,255,.48);color:#aef7ff}.secondary-button.active{color:#d9c4ff;border-color:rgba(180,140,255,.55)}.rewind-button{border-color:rgba(255,179,80,.58);color:#ffe0a8;background:rgba(90,50,11,.65)}button:disabled{opacity:.45;cursor:not-allowed}
 .timeline-main{display:grid;gap:3px;min-width:180px;flex:1}.timeline-labels{display:flex;justify-content:space-between;color:var(--text-tertiary);font-size:.56rem;font-variant-numeric:tabular-nums}.timeline-track{position:relative;height:22px}.timeline-live,.timeline-viewed{position:absolute;left:0;top:10px;height:2px;pointer-events:none}.timeline-live{background:rgba(102,143,154,.38)}.timeline-viewed{background:linear-gradient(90deg,var(--signal-primary),#b48cff)}.timeline-track input{position:absolute;inset:0;width:100%;height:22px;margin:0;opacity:.84;cursor:ew-resize;accent-color:var(--signal-primary)}
 .checkpoint-marker{position:absolute;top:3px;z-index:3;width:10px;height:16px;padding:0;border:1px solid #ffc15a;background:#805417;clip-path:polygon(50% 0,100% 35%,72% 100%,28% 100%,0 35%);transform:translateX(-50%)}.checkpoint-marker.snapped{background:#ffc85f;box-shadow:0 0 10px rgba(255,193,90,.62)}.checkpoint-marker.selected{background:#ffe19c;box-shadow:0 0 12px rgba(255,193,90,.85)}.checkpoint-marker.status-used,.checkpoint-marker.status-superseded{border-color:#6e7881;background:#39434a;opacity:.62}

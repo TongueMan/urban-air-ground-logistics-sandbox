@@ -7,6 +7,7 @@
     :time-cursor="context.timeCursor.value"
     :time-mode="context.timeMode.value"
     :planning-preview="runtime.plannerOpen.value && Boolean(runtime.taskPreview.value)"
+    :tutorial-red-conflict-locked="runtime.tutorialRedConflictLocked.value"
     :model-assignments="modelAssignments"
     @select="context.focusActor"
     @select-airspace="runtime.selectAirspace"

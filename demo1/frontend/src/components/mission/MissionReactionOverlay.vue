@@ -199,6 +199,7 @@ function resetPresentation() {
 }
 
 function pumpPresentation() {
+  if (runtime.tutorialMissionReactionsSuppressed?.value) return
   if (!state.active && !state.settlement && state.queue.length) {
     replaceState(startNextMissionReaction(state))
     reactionTimer = window.setTimeout(() => {
@@ -266,7 +267,7 @@ function sessionDescriptor(session) {
 }
 
 watch(() => runtime.latestEconomyTransaction?.value, transaction => {
-  if (!transaction) return
+  if (!transaction || runtime.tutorialMissionReactionsSuppressed?.value) return
   const currentRunId = String(runtime.session.value?.id || '')
   if (transaction.runId && String(transaction.runId) !== currentRunId) return
   replaceState(enqueueMissionReaction(state, transaction))
@@ -285,12 +286,17 @@ watch(() => (missionEconomy.value.activeIncursions || []).map(incursion => ({
 })), incursions => {
   const session = runtime.session.value
   const replay = context.timeMode.value === 'REPLAY' || Boolean(runtime.replayBundle?.value)
-  if (replay || session?.status !== 'RUNNING' || !session?.taskInstanceId) return
+  if (runtime.tutorialMissionReactionsSuppressed?.value || replay || session?.status !== 'RUNNING' || !session?.taskInstanceId) return
   for (const incursion of incursions) {
     replaceState(enqueueAirspaceEntryReaction(state, incursion, session.id))
   }
   pumpPresentation()
 }, { immediate: true, flush: 'post' })
+
+watch(() => runtime.tutorialMissionReactionsSuppressed?.value, suppressed => {
+  if (suppressed) resetPresentation()
+  else pumpPresentation()
+})
 
 watch(() => sessionDescriptor(runtime.session.value), current => {
   if (!sessionPrimed) {
