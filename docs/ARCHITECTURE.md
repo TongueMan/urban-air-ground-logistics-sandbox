@@ -92,6 +92,7 @@ FFmpeg 媒体发布器 ── RTSP ── MediaMTX ── WHEP ── 浏览器
 ## 部署与容量
 
 - 基础 Compose 包含 MySQL、Mosquitto、MediaMTX、媒体发布器、后端和前端六个服务。
+- 人物图片、任务反馈图片与 GLB 可由 OSS 提供；前端通过运行时资源基址优先访问 OSS，并在对象不可达时回退到容器内副本。
 - 生产覆盖配置面向 2 核 4 GB 主机，默认最多 12 个活动任务、100 个排队访客。
 - Nginx 的 `8088` 是唯一业务 HTTP 入口；WebRTC 使用 TCP/UDP `8189`。
 - MySQL 与 MQTT 使用命名卷；普通 `docker compose down` 不删除数据。

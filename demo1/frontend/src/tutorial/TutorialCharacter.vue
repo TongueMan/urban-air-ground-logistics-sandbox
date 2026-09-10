@@ -1,16 +1,24 @@
 <template>
   <figure class="tutorial-character" :class="[`side-${character.side}`, { 'is-speaking': active, 'is-muted': !active, 'is-action': actionMode, 'is-planner': plannerAware, 'is-fleet': fleetAware, 'is-inspector': inspectorAware }]">
-    <img :src="imageSource" :alt="`${character.name}${active ? '正在说话' : ''}`" draggable="false">
+    <img :src="imageSource" :alt="`${character.name}${active ? '正在说话' : ''}`" draggable="false" @error="useLocalImage">
   </figure>
 </template>
 
 <script setup>
 import { computed } from 'vue'
+import { localStaticAssetUrl, staticAssetUrl } from '../config/runtime'
 import { CHARACTER_MANIFEST, getCharacterExpression } from './characterManifest.mjs'
 
 const props = defineProps({ actor: { type: String, required: true }, expression: { type: String, default: 'default' }, active: Boolean, actionMode: Boolean, plannerAware: Boolean, fleetAware: Boolean, inspectorAware: Boolean })
 const character = computed(() => CHARACTER_MANIFEST[props.actor])
-const imageSource = computed(() => getCharacterExpression(props.actor, props.active ? props.expression : 'default'))
+const imagePath = computed(() => getCharacterExpression(props.actor, props.active ? props.expression : 'default'))
+const remoteImagePath = computed(() => imagePath.value.replace(/^\/?tutorial\/characters\//, 'characters/'))
+const imageSource = computed(() => staticAssetUrl(imagePath.value, remoteImagePath.value))
+
+function useLocalImage(event) {
+  const fallback = localStaticAssetUrl(imagePath.value)
+  if (event.currentTarget.getAttribute('src') !== fallback) event.currentTarget.src = fallback
+}
 </script>
 
 <style scoped>

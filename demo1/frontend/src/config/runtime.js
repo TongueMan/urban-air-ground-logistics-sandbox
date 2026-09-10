@@ -46,10 +46,25 @@ export function smartCityAssetUrl(path) {
   return `${runtimeConfig.smartCityAssetBase}/${String(path).replace(/^\/+/, '')}`
 }
 
-export function staticAssetUrl(path) {
+export function staticAssetUrl(path, remotePath = path) {
   const value = String(path || '')
   if (/^(?:https?:)?\/\//i.test(value) || /^(?:data|blob):/i.test(value)) return value
-  return `${runtimeConfig.staticAssetBase}/${value.replace(/^\/+/, '')}`
+  const normalizedPath = String(remotePath || value).replace(/^\/+/, '')
+  return runtimeConfig.staticAssetBase
+    ? `${runtimeConfig.staticAssetBase}/${normalizedPath}`
+    : localStaticAssetUrl(value)
+}
+
+export function localStaticAssetUrl(path) {
+  const value = String(path || '')
+  if (/^(?:data|blob):/i.test(value)) return value
+  return `/${value.replace(/^\/+/, '')}`
+}
+
+export function staticAssetCandidates(path, remotePath = path) {
+  const primary = staticAssetUrl(path, remotePath)
+  const fallback = localStaticAssetUrl(path)
+  return primary === fallback ? [primary] : [primary, fallback]
 }
 
 export function parkingImageUrl(imageKey) {

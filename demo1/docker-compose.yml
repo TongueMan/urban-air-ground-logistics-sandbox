@@ -116,6 +116,7 @@ services:
     environment:
       FRONTEND_BAIDU_MAP_AK: ${FRONTEND_BAIDU_MAP_AK:-}
       FRONTEND_MEDIA_BASE: /media
+      FRONTEND_STATIC_ASSET_BASE: ${FRONTEND_STATIC_ASSET_BASE:-https://java-tongueman.oss-cn-beijing.aliyuncs.com/%E5%9F%8E%E5%B8%82%E7%A9%BA%E5%9C%B0%E5%8D%8F%E5%90%8C%E7%89%A9%E6%B5%81%E8%BF%90%E8%90%A5%E6%B2%99%E7%9B%98}
     volumes:
       - ./media:/usr/share/nginx/html/fallback-media:ro
     ports:

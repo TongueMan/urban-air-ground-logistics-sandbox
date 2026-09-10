@@ -39,7 +39,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import * as mapvthree from '@baidumap/mapv-three'
-import { runtimeConfig, staticAssetUrl } from '../config/runtime'
+import { runtimeConfig, staticAssetCandidates } from '../config/runtime'
 import { createBaiduCyberProvider } from '../config/baiduCyberMap'
 import { ACTIVE_MODEL_ROLES, getModelAsset, mapPresentationForAsset } from '../config/modelAssets.mjs'
 import { centerSceneForTransform } from '../utils/modelSceneTransforms.mjs'
@@ -493,7 +493,7 @@ function tuneModelMaterial(role, assetId, node, source) {
 
 async function loadTemplate(assetId, role) {
   const asset = getModelAsset(assetId)
-  const gltf = await gltfLoader.loadAsync(`${staticAssetUrl(asset.path)}?v=${MODEL_ASSET_REVISION}`)
+  const gltf = await loadStaticGltf(asset.path)
   const root = gltf.scene
   root.traverse(node => {
     if (!node.isMesh || !node.material) return
@@ -519,6 +519,17 @@ async function loadTemplate(assetId, role) {
     normalizedScale: presentationForAsset(assetId, role).size / Math.max(size.x, size.y, size.z, .001)
   }
 }
+async function loadStaticGltf(path) {
+  let lastError
+  for (const candidate of staticAssetCandidates(path)) {
+    try {
+      return await gltfLoader.loadAsync(`${candidate}?v=${MODEL_ASSET_REVISION}`)
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError || new Error(`Unable to load ${path}`)
+}
 async function ensureModelTemplate(assetId, role) {
   if (!modelTemplates || modelTemplates.has(assetId)) return modelTemplates?.get(assetId)
   if (!modelTemplateLoads.has(assetId)) {
@@ -537,7 +548,7 @@ async function ensureRewardTemplate(assetId) {
   if (!modelTemplates || modelTemplates.has(assetId)) return modelTemplates?.get(assetId)
   if (!modelTemplateLoads.has(assetId)) {
     const asset = getModelAsset(assetId)
-    modelTemplateLoads.set(assetId, gltfLoader.loadAsync(`${staticAssetUrl(asset.path)}?v=${MODEL_ASSET_REVISION}`)
+    modelTemplateLoads.set(assetId, loadStaticGltf(asset.path)
       .then(gltf => {
         const scene = gltf.scene
         scene.traverse(node => {

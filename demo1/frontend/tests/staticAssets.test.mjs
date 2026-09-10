@@ -1,0 +1,37 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+test('OSS static asset URLs keep the local public path as a fallback', async () => {
+  globalThis.window = {
+    __SKYFLEET_CONFIG__: {
+      staticAssetBase: 'https://java-tongueman.oss-cn-beijing.aliyuncs.com/project/'
+    }
+  }
+  const runtime = await import('../src/config/runtime.js?oss-test')
+  delete globalThis.window
+
+  assert.equal(
+    runtime.staticAssetUrl('/models/library/rewards/gold-coin.glb'),
+    'https://java-tongueman.oss-cn-beijing.aliyuncs.com/project/models/library/rewards/gold-coin.glb'
+  )
+  assert.deepEqual(runtime.staticAssetCandidates('/tutorial/characters/anan-default.png', 'characters/anan-default.png'), [
+    'https://java-tongueman.oss-cn-beijing.aliyuncs.com/project/characters/anan-default.png',
+    '/tutorial/characters/anan-default.png'
+  ])
+  assert.equal(
+    runtime.staticAssetUrl('/mission/reactions/anan-airspace-fine.png', '/reactions/anan-airspace-fine.png'),
+    'https://java-tongueman.oss-cn-beijing.aliyuncs.com/project/reactions/anan-airspace-fine.png'
+  )
+})
+
+test('local static assets remain the only candidate without an OSS base', async () => {
+  const runtime = await import('../src/config/runtime.js?local-test')
+  assert.equal(runtime.staticAssetUrl('mission/reactions/anan-airspace-fine.png'), '/mission/reactions/anan-airspace-fine.png')
+  assert.equal(
+    runtime.staticAssetUrl('mission/reactions/anan-airspace-fine.png', 'reactions/anan-airspace-fine.png'),
+    '/mission/reactions/anan-airspace-fine.png'
+  )
+  assert.deepEqual(runtime.staticAssetCandidates('models/smart-city/traffic/ford-f350-utility.glb'), [
+    '/models/smart-city/traffic/ford-f350-utility.glb'
+  ])
+})

@@ -104,6 +104,7 @@ docker compose --env-file .env.local down
 | 变量 | 必需 | 说明 |
 | --- | --- | --- |
 | `FRONTEND_BAIDU_MAP_AK` | 是 | 浏览器端地图 AK，Referer 白名单需覆盖访问地址 |
+| `FRONTEND_STATIC_ASSET_BASE` | 否 | 人物图片、任务反馈图片与 GLB 的 OSS 基址；远程加载失败时回退到容器内副本 |
 | `BAIDU_ROUTE_AK` | 否 | 服务端路线规划 AK；留空时固化模板保底路线 |
 | `DEEPSEEK_API_KEY` | 否 | 仅服务端使用的方案解释密钥 |
 | `DEMO_COOKIE_SECRET` | 生产必需 | 访客 Cookie HMAC 密钥，至少 32 个随机字符 |
@@ -113,6 +114,16 @@ docker compose --env-file .env.local down
 | `FLEET_DEV_PRICING_ENABLED` | 否 | 本地免费采购开关；生产覆盖配置默认关闭 |
 
 密钥不得添加 `VITE_` 或 `FRONTEND_` 前缀，除明确设计为浏览器公开值的地图 AK 外，也不得进入前端变量、源码、数据库或日志。
+
+## OSS 静态资源
+
+人物图片、任务反馈图片和三维模型可由阿里云 OSS 提供，本地文件继续保留为自动回退。默认对象前缀为 `城市空地协同物流运营沙盘/`，远程目录约定如下：
+
+- `characters/`：教程人物图片，对应本地 `frontend/public/tutorial/characters/`。
+- `reactions/`：任务反馈图片，对应本地 `frontend/public/mission/reactions/`。
+- `models/`：三维模型，对应本地 `frontend/public/models/`。
+
+OSS 必须允许跨域 `GET` 和 `HEAD`；公开静态资源可暂时使用来源 `*`。演示视频不进入 OSS。
 
 ## 本地开发
 

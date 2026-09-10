@@ -21,10 +21,10 @@
       <figure class="reaction-character character-anan">
         <img
           v-if="assetVisible(activeAssets.anan)"
-          :src="activeAssets.anan"
+          :src="resolvedAsset(activeAssets.anan)"
           :alt="state.active.kind === 'diamond' ? '阿南竖起拇指赞赏' : '阿南遗憾地挠头'"
           draggable="false"
-          @error="markAssetFailed(activeAssets.anan)"
+          @error="useLocalAsset($event, activeAssets.anan)"
         >
       </figure>
 
@@ -51,10 +51,10 @@
       <figure class="reaction-character character-cheng">
         <img
           v-if="assetVisible(activeAssets.cheng)"
-          :src="activeAssets.cheng"
+          :src="resolvedAsset(activeAssets.cheng)"
           :alt="state.active.kind === 'diamond' ? '程昱托起粉钻赞赏' : '程昱扶额表示遗憾'"
           draggable="false"
-          @error="markAssetFailed(activeAssets.cheng)"
+          @error="useLocalAsset($event, activeAssets.cheng)"
         >
       </figure>
     </section>
@@ -84,10 +84,10 @@
       <figure class="settlement-character settlement-left">
         <img
           v-if="assetVisible(settlementAssets.cheng)"
-          :src="settlementAssets.cheng"
+          :src="resolvedAsset(settlementAssets.cheng)"
           alt="程昱背面展示双臂肌肉庆祝任务完成"
           draggable="false"
-          @error="markAssetFailed(settlementAssets.cheng)"
+          @error="useLocalAsset($event, settlementAssets.cheng)"
         >
       </figure>
 
@@ -132,10 +132,10 @@
       <figure class="settlement-character settlement-right">
         <img
           v-if="assetVisible(settlementAssets.anan)"
-          :src="settlementAssets.anan"
+          :src="resolvedAsset(settlementAssets.anan)"
           alt="阿南正面展示肌肉庆祝任务完成"
           draggable="false"
-          @error="markAssetFailed(settlementAssets.anan)"
+          @error="useLocalAsset($event, settlementAssets.anan)"
         >
       </figure>
     </section>
@@ -144,6 +144,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { localStaticAssetUrl, staticAssetUrl } from '../../config/runtime'
 import { useMissionContext } from '../../mission/context/useMissionContext'
 import {
   MISSION_REACTION_ASSETS,
@@ -212,8 +213,23 @@ function pumpPresentation() {
   }
 }
 
-function markAssetFailed(path) {
-  if (path) failedAssets[path] = true
+function resolvedAsset(path) {
+  return staticAssetUrl(path, remoteReactionPath(path))
+}
+
+function remoteReactionPath(path) {
+  return String(path || '').replace(/^\/?mission\/reactions\//, 'reactions/')
+}
+
+function useLocalAsset(event, path) {
+  if (!path) return
+  const fallback = localStaticAssetUrl(path)
+  if (event.currentTarget.dataset.localFallback !== 'true' && event.currentTarget.getAttribute('src') !== fallback) {
+    event.currentTarget.dataset.localFallback = 'true'
+    event.currentTarget.src = fallback
+    return
+  }
+  failedAssets[path] = true
 }
 
 function assetVisible(path) {
@@ -312,7 +328,7 @@ function preloadReactionAssets() {
   preloadedImages = MISSION_REACTION_ASSET_PATHS.map(path => {
     const image = new Image()
     image.decoding = 'async'
-    image.src = path
+    image.src = staticAssetUrl(path, remoteReactionPath(path))
     return image
   })
 }

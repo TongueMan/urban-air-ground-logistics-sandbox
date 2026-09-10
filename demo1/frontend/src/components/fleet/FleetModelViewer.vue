@@ -21,7 +21,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js'
 import { clone as cloneSkeleton } from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { getModelAsset } from '../../config/modelAssets.mjs'
-import { staticAssetUrl } from '../../config/runtime'
+import { staticAssetCandidates } from '../../config/runtime'
 
 const props = defineProps({ modelAssetId: { type: String, default: '' }, active: { type: Boolean, default: true } })
 const viewport = ref(null)
@@ -100,7 +100,17 @@ function touchCache(id, entry) {
 async function cachedAsset(id) {
   if (cache.has(id)) { const entry = cache.get(id); touchCache(id, entry); return entry }
   const asset = getModelAsset(id)
-  const gltf = await loader.loadAsync(`${staticAssetUrl(asset.path)}?v=fleet-hub-1`)
+  let gltf
+  let lastError
+  for (const candidate of staticAssetCandidates(asset.path)) {
+    try {
+      gltf = await loader.loadAsync(`${candidate}?v=fleet-hub-1`)
+      break
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (!gltf) throw lastError || new Error(`Unable to load ${asset.path}`)
   const entry = { scene: gltf.scene, animations: gltf.animations || [] }
   touchCache(id, entry)
   return entry
