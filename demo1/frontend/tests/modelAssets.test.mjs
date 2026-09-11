@@ -56,6 +56,8 @@ test('license and active-use metadata remain explicit', () => {
   assert.equal(MODEL_ASSETS['pink-diamond'].sha256, 'dc1bfdf76112c9951eb2fdc7c0b86dc03a4b2d91c794348f2bce116221ed06ce')
   assert.equal(MODEL_ASSETS['cybertruck-fun-size'].license, 'CC-BY-NC-4.0')
   assert.equal(MODEL_ASSETS['cybertruck-fun-size'].lifecycle, 'active')
+  assert.equal(MODEL_ASSETS['smart-city-drone'].license, 'NON-COMMERCIAL')
+  assert.equal(MODEL_ASSETS['smart-city-drone'].sha256, '3647feb65c73875e9ba5b2a33374f506e3ed3eac1d1050f7f3156065239f7b6d')
   assert.equal(MODEL_ASSETS.tricycle.license, 'CC-BY-4.0')
   assert.equal(MODEL_ASSETS['vtol-air-taxi'].lifecycle, 'active')
 })

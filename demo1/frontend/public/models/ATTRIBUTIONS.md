@@ -12,5 +12,6 @@ these credits when redistributing the models or a build that contains them.
 - **Gold coin** by [TomaszObloj](https://sketchfab.com/tomasz_obloj) — [source](https://sketchfab.com/3d-models/gold-coin-ede8f6b0f13f45fb9b9a2efc9a09bae8), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Used as the delivery reward marker.
 - **pink diamond** by [gabrisciarrone](https://sketchfab.com/gabrisciarrone) — [source](https://sketchfab.com/3d-models/pink-diamond-fcdd2b8c52f0473f93b8f0c1acc6a2f1), [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Used as the high-value airspace manoeuvre reward.
 
-The provenance and license of `drone.glb` have not yet been established. Do
-not redistribute it externally until that review is complete.
+- **Light Delivery Drone** — the project owner has confirmed that this asset is
+  free to use and redistribute with this non-commercial project. No upstream
+  author, source URL, or standard license identifier was supplied.

@@ -57,9 +57,9 @@ export const MODEL_ASSETS = Object.freeze({
     bytes: 3417916,
     sha256: '3647feb65c73875e9ba5b2a33374f506e3ed3eac1d1050f7f3156065239f7b6d',
     scene: Object.freeze({ nodes: 249, meshes: 1, materials: 1, textures: 0, animations: 1, skins: 1 }),
-    license: 'UNKNOWN',
+    license: 'NON-COMMERCIAL',
     source: null,
-    notes: '当前轻型配送无人机模型；带骨骼和 1 段动画，来源和授权仍需补录。'
+    notes: '当前轻型配送无人机模型；带骨骼和 1 段动画。项目所有者确认该模型可免费用于并随本非商业项目发布。'
   }),
   'peterbilt-379-optimus-prime': Object.freeze({
     id: 'peterbilt-379-optimus-prime',
