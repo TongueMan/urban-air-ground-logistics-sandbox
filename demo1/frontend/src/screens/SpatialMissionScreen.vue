@@ -12,7 +12,7 @@
       <MissionState :runtime="runtime" :fleet-runtime="fleetRuntime" />
       <MissionSpine />
       <FleetDock :fleet-runtime="fleetRuntime" />
-      <InstrumentCluster v-if="context.mission.value.actors.length" />
+      <InstrumentCluster v-if="context.mission.value.actors.length" :fleet-runtime="fleetRuntime" />
       <ActionLayer :runtime="runtime" />
       <TaskPlanner v-if="runtime.plannerOpen.value" :runtime="runtime" />
       <TaskHistory v-if="runtime.historyOpen.value" :runtime="runtime" />

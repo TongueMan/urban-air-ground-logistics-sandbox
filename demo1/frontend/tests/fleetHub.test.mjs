@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { MODEL_ASSETS } from '../src/config/modelAssets.mjs'
 import { deployedFleetAssignments, effectiveFleetPrice, fleetCounts, fleetSections, formatCny } from '../src/fleet/fleetCatalog.mjs'
+import { instrumentFleetVehicleState } from '../src/fleet/instrumentFleetState.mjs'
 import { batteryTone, chargeRemainingSeconds, projectedBatteryPercent } from '../src/fleet/vehicleGameplay.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
@@ -159,6 +160,56 @@ test('battery colors use the five gameplay bands and charging projects linearly'
   }
   assert.equal(projectedBatteryPercent(asset, Date.parse('2026-09-09T00:00:30.000Z')), 60)
   assert.equal(chargeRemainingSeconds(asset, Date.parse('2026-09-09T00:00:30.000Z')), 30)
+})
+
+test('idle mission instrument follows live fleet charging instead of its frozen preview battery', () => {
+  const mission = {
+    status: 'STANDBY',
+    source: { session: null },
+    airVehicle: { assetId: 'FLT-A', stateVersion: 7 }
+  }
+  const snapshot = {
+    catalog,
+    assets: [{
+      assetId: 'FLT-A', typeId: 'smart-city-drone', status: 'GARAGED', stateVersion: 8,
+      batteryPercent: 55, chargingFromPercent: 55, charging: true,
+      chargingStartedAt: '2026-09-09T00:00:00.000Z',
+      chargingCompletesAt: '2026-09-09T00:01:00.000Z'
+    }]
+  }
+
+  assert.equal(instrumentFleetVehicleState(
+    mission, snapshot, 'AIR', Date.parse('2026-09-09T00:00:30.000Z')
+  ).batteryPercent, 77.5)
+  assert.equal(instrumentFleetVehicleState(
+    mission, snapshot, 'AIR', Date.parse('2026-09-09T00:01:00.000Z')
+  ).batteryPercent, 100)
+
+  snapshot.assets[0] = {
+    ...snapshot.assets[0], status: 'DEPLOYED', stateVersion: 9, batteryPercent: 100, charging: false
+  }
+  assert.equal(instrumentFleetVehicleState(mission, snapshot, 'AIR').batteryPercent, 100)
+})
+
+test('running instrument keeps mission telemetry and terminal state waits for a newer fleet snapshot', () => {
+  const snapshot = {
+    catalog,
+    assets: [{ assetId: 'FLT-A', typeId: 'smart-city-drone', status: 'DEPLOYED', stateVersion: 7, batteryPercent: 100 }]
+  }
+  const mission = {
+    status: 'RUNNING',
+    source: { session: { id: 'RUN-1' } },
+    airVehicle: { assetId: 'FLT-A', stateVersion: 7 }
+  }
+  assert.equal(instrumentFleetVehicleState(mission, snapshot, 'AIR'), null)
+
+  mission.status = 'COMPLETED'
+  assert.equal(instrumentFleetVehicleState(mission, snapshot, 'AIR'), null)
+  snapshot.assets[0].stateVersion = 8
+  snapshot.assets[0].activeRunId = 'RUN-1'
+  assert.equal(instrumentFleetVehicleState(mission, snapshot, 'AIR'), null)
+  snapshot.assets[0].activeRunId = null
+  assert.equal(instrumentFleetVehicleState(mission, snapshot, 'AIR').batteryPercent, 100)
 })
 
 test('catalog cards remain renderer-free and hub owns one shared viewer', () => {

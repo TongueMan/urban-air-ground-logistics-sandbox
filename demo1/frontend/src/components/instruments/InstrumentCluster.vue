@@ -27,19 +27,43 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useMissionContext } from '../../mission/context/useMissionContext'
 import { airVehicleSummary, groundVehicleSummary } from '../../mission/presentation/missionSelectors.mjs'
 import { batteryTone } from '../../fleet/vehicleGameplay.mjs'
+import { instrumentFleetVehicleState } from '../../fleet/instrumentFleetState.mjs'
 import InstrumentValue from '../spatial/InstrumentValue.vue'
 
+const props = defineProps({ fleetRuntime: { type: Object, required: true } })
 const context = useMissionContext()
-const ground = computed(() => groundVehicleSummary(context.mission.value))
-const air = computed(() => airVehicleSummary(context.mission.value))
+const clockNow = ref(Date.now())
+let clockTimer = 0
+
+function synchronizedSummary(base, category) {
+  const fleetState = instrumentFleetVehicleState(
+    context.mission.value,
+    props.fleetRuntime.snapshot.value,
+    category,
+    clockNow.value
+  )
+  if (!fleetState) return base
+  return {
+    ...base,
+    name: fleetState.name || base.name,
+    battery: fleetState.batteryPercent,
+    depleted: fleetState.batteryPercent <= 0
+  }
+}
+
+const ground = computed(() => synchronizedSummary(groundVehicleSummary(context.mission.value), 'GROUND'))
+const air = computed(() => synchronizedSummary(airVehicleSummary(context.mission.value), 'AIR'))
 const groundTone = computed(() => batteryTone(ground.value.battery))
 const airTone = computed(() => batteryTone(air.value.battery))
 const batteryLabel = tone => ({ green: '电量充足', yellow: '请关注电量', orange: '建议尽快补能', red: '低电量警告', depleted: '电量耗尽', unknown: '等待遥测' })[tone]
 function value(input, digits) { const numeric = Number(input); return Number.isFinite(numeric) ? numeric.toFixed(digits) : '—' }
+
+onMounted(() => { clockTimer = window.setInterval(() => { clockNow.value = Date.now() }, 1000) })
+onBeforeUnmount(() => { if (clockTimer) window.clearInterval(clockTimer) })
 </script>
 
 <style scoped>
