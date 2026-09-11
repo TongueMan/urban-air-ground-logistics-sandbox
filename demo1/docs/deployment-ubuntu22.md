@@ -47,6 +47,18 @@ FLEET_DEV_PRICING_ENABLED=false
 
 浏览器端百度地图 AK 会出现在网页中，这属于正常行为，但必须在百度控制台将 Referer 白名单限制到正式域名。`BAIDU_ROUTE_AK` 是可选的服务端路线规划 AK，应限制为服务器公网 IP。
 
+### OSS 静态资源跨域规则
+
+网页与 OSS 不同源时，浏览器只有在 Bucket 明确允许当前网页来源后才能读取模型。在 OSS 控制台的 `java-tongueman` Bucket 中打开“权限控制 → 跨域设置”，新增规则且不要覆盖其他项目已有规则：
+
+- 来源：`http://120.26.32.16:8088`（以后使用 HTTPS 域名时再加入正式域名）；
+- 允许 Methods：`GET`、`HEAD`；
+- 允许 Headers：`*`；
+- 暴露 Headers：`ETag`、`Content-Length`、`Content-Range`、`Accept-Ranges`；
+- 缓存时间：`3600` 秒。
+
+来源必须包含协议和非标准端口，且末尾不要添加 `/`。保存后，带该 `Origin` 请求模型时应返回 `Access-Control-Allow-Origin: http://120.26.32.16:8088`。
+
 ## 3. 启动并进行本机检查
 
 生产配置会在缺少关键密码、Cookie 密钥或浏览器地图 AK 时直接拒绝启动：
