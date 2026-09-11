@@ -6,10 +6,6 @@ export function signalById(mission, signalId) {
   return mission?.signalsById?.[String(signalId || '')] || null
 }
 
-export function preferredMediaSource(actor) {
-  return actor?.mediaSources?.find(source => source.role === 'PRIMARY') || actor?.mediaSources?.[0] || null
-}
-
 export function missionSummary(mission, focusedActorId = '') {
   const focused = actorById(mission, focusedActorId)
   const actors = focused ? [focused] : (mission?.actors || [])

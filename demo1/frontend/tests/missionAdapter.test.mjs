@@ -77,15 +77,7 @@ test('normalizes current demo events into stable signals without fake command ac
   assert.equal(signal.status, 'DETECTED')
   assert.equal(signal.severity, 'WARNING')
   assert.equal(signal.requiresAction, true)
-  assert.ok(signal.actions.every(action => ['FOCUS_ACTOR', 'OPEN_MEDIA'].includes(action.kind)))
-})
-
-test('binds media only through the explicit compatibility registry', () => {
-  const value = snapshot()
-  value.devices = [{ deviceId: 'HF-UAV-000003', deviceType: 'ground_vehicle', deviceName: '显式绑定测试', longitude: 117, latitude: 31, sensorData: {} }]
-  const mission = adaptCurrentDemoSnapshot(value)
-  assert.equal(mission.actors[0].kind, 'VEHICLE')
-  assert.equal(mission.actors[0].mediaSources[0].streamKey, 'delivery_uav_cam_01')
+  assert.ok(signal.actions.every(action => action.kind === 'FOCUS_ACTOR'))
 })
 
 test('prefers server-managed signal identity, lifecycle, and allowed workflow actions', () => {
@@ -129,7 +121,6 @@ test('prefers explicit server fleet metadata and command transport boundaries', 
     actorKind: 'UAV',
     actorRole: 'AIR_COURIER',
     capabilities: ['DELIVERY', 'THERMAL'],
-    mediaSources: [{ id: 'server-media', streamKey: 'server_stream' }],
     formationId: 'FORMATION-X',
     assignmentId: 'ASSIGN-X',
     commandCapabilities: ['RETURN', 'REDELIVER'],
@@ -140,7 +131,6 @@ test('prefers explicit server fleet metadata and command transport boundaries', 
   const mission = adaptCurrentDemoSnapshot(value)
   const actor = mission.actorsById['aircraft-bravo']
   assert.deepEqual(actor.capabilities, ['DELIVERY', 'THERMAL'])
-  assert.equal(actor.mediaSources[0].streamKey, 'server_stream')
   assert.equal(actor.formationId, 'FORMATION-X')
   assert.equal(actor.commandTransport.status, 'UNAVAILABLE')
   assert.equal(mission.assignments[0].routeId, 'AIR-X')

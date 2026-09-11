@@ -47,8 +47,6 @@ public final class DemoSession {
     public final Map<String, Map<String, Object>> trafficStops = new ConcurrentHashMap<>();
     public final Set<String> triggeredEvents = ConcurrentHashMap.newKeySet();
     public final Map<String, DemoSignal> signals = new ConcurrentHashMap<>();
-    public final Map<String, Map<String, Object>> advisories = new ConcurrentHashMap<>();
-    public final Map<String, Map<String, Object>> decisions = new ConcurrentHashMap<>();
     /** Runtime-only route substitutions; the frozen TaskInstance plan is never overwritten. */
     public final Map<String, List<List<Number>>> airRouteOverrides = new ConcurrentHashMap<>();
     public final Map<String, Map<String, Object>> airspaceActions = new ConcurrentHashMap<>();

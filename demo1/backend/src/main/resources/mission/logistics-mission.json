@@ -43,10 +43,7 @@
       "kind": "VEHICLE",
       "role": "MOBILE_BASE",
       "deviceType": "ground_vehicle",
-      "capabilities": ["MOBILITY", "UAV_CARRIER", "CAMERA", "TELEMETRY"],
-      "mediaSources": [
-        {"id": "media-vehicle-01", "kind": "VIDEO", "role": "PRIMARY", "label": "配送车道路运输视角", "streamKey": "delivery_vehicle_cam_01", "fallbackFile": "delivery_vehicle_cam_01.mp4"}
-      ],
+      "capabilities": ["MOBILITY", "UAV_CARRIER", "TELEMETRY"],
       "routeId": "GROUND-A",
       "formationId": "FORMATION-A",
       "assignmentId": "ASSIGN-VEHICLE-A",
@@ -59,10 +56,7 @@
       "kind": "UAV",
       "role": "AIR_COURIER",
       "deviceType": "smart_drone",
-      "capabilities": ["FLIGHT", "DELIVERY", "CAMERA", "TELEMETRY"],
-      "mediaSources": [
-        {"id": "media-uav-01", "kind": "VIDEO", "role": "PRIMARY", "label": "一号无人机配送视角", "streamKey": "delivery_uav_cam_01", "fallbackFile": "delivery_uav_cam_01.mp4"}
-      ],
+      "capabilities": ["FLIGHT", "DELIVERY", "TELEMETRY"],
       "routeId": "AIR-A",
       "carrierActorId": "HF-VEH-000001",
       "formationId": "FORMATION-A",
@@ -76,8 +70,7 @@
       "kind": "VEHICLE",
       "role": "MOBILE_BASE",
       "deviceType": "ground_vehicle",
-      "capabilities": ["MOBILITY", "UAV_CARRIER", "CAMERA", "TELEMETRY"],
-      "mediaSources": [],
+      "capabilities": ["MOBILITY", "UAV_CARRIER", "TELEMETRY"],
       "routeId": "GROUND-B",
       "formationId": "FORMATION-B",
       "assignmentId": "ASSIGN-VEHICLE-B",
@@ -90,10 +83,7 @@
       "kind": "UAV",
       "role": "AIR_COURIER",
       "deviceType": "smart_drone",
-      "capabilities": ["FLIGHT", "DELIVERY", "CAMERA", "TELEMETRY"],
-      "mediaSources": [
-        {"id": "media-uav-02", "kind": "VIDEO", "role": "PRIMARY", "label": "二号无人机配送视角", "streamKey": "delivery_uav_cam_02", "fallbackFile": "delivery_uav_cam_02.mp4"}
-      ],
+      "capabilities": ["FLIGHT", "DELIVERY", "TELEMETRY"],
       "routeId": "AIR-B",
       "carrierActorId": "HF-VEH-000002",
       "formationId": "FORMATION-B",

@@ -27,8 +27,6 @@
 | 经济系统 | 公司余额、幂等账本、配送收益、时效奖励、挑战奖励、空域罚款 |
 | 实时链路 | REST、SSE 增量事件、MQTT 遥测、断线恢复 |
 | 复盘能力 | 配送记录、实际轨迹、检查点回退、确定性重现 |
-| 智能解释 | DeepSeek Provider Adapter；未配置时使用确定性规则方案 |
-| 视频 | 两路无人机与一路车辆视频，WHEP 播放、MP4 降级 |
 
 ## 权威规则
 
@@ -46,8 +44,7 @@
 浏览器
 ├─ Vue 3 操作界面
 ├─ 百度 MapV Three / Three.js 三维任务空间
-├─ REST + SSE
-└─ WHEP / MP4
+└─ REST + SSE
         │
         ▼
 Nginx（唯一业务 HTTP 入口）
@@ -56,7 +53,6 @@ Nginx（唯一业务 HTTP 入口）
 │  ├─ 车队、经济、空域与交通规则
 │  ├─ MQTT 遥测
 │  └─ MySQL / Flyway
-└─ MediaMTX ← FFmpeg 媒体发布器
 ```
 
 完整边界见仓库级[架构说明](../docs/ARCHITECTURE.md)。
@@ -87,7 +83,7 @@ FRONTEND_BAIDU_MAP_AK=你的浏览器端百度地图AK
 docker compose --env-file .env.local up -d --build
 ```
 
-所有容器健康后访问 <http://127.0.0.1:8088>。这是唯一业务 HTTP 入口；WebRTC 另需放行 TCP/UDP 8189。
+所有容器健康后访问 <http://127.0.0.1:8088>。这是唯一业务 HTTP 入口。
 
 停止服务：
 
@@ -106,11 +102,9 @@ docker compose --env-file .env.local down
 | `FRONTEND_BAIDU_MAP_AK` | 是 | 浏览器端地图 AK，Referer 白名单需覆盖访问地址 |
 | `FRONTEND_STATIC_ASSET_BASE` | 否 | 人物图片、任务反馈图片与 GLB 的 OSS 基址；远程加载失败时回退到容器内副本 |
 | `BAIDU_ROUTE_AK` | 否 | 服务端路线规划 AK；留空时固化模板保底路线 |
-| `DEEPSEEK_API_KEY` | 否 | 仅服务端使用的方案解释密钥 |
 | `DEMO_COOKIE_SECRET` | 生产必需 | 访客 Cookie HMAC 密钥，至少 32 个随机字符 |
 | `MYSQL_PASSWORD` | 生产必需 | MySQL 业务用户密码 |
 | `MYSQL_ROOT_PASSWORD` | 生产必需 | MySQL root 密码 |
-| `MEDIA_WEBRTC_ADDITIONAL_HOSTS` | 公网部署必需 | MediaMTX 对外可达域名或 IP |
 | `FLEET_DEV_PRICING_ENABLED` | 否 | 本地免费采购开关；生产覆盖配置默认关闭 |
 
 密钥不得添加 `VITE_` 或 `FRONTEND_` 前缀，除明确设计为浏览器公开值的地图 AK 外，也不得进入前端变量、源码、数据库或日志。
@@ -123,14 +117,14 @@ docker compose --env-file .env.local down
 - `reactions/`：任务反馈图片，对应本地 `frontend/public/mission/reactions/`。
 - `models/`：三维模型，对应本地 `frontend/public/models/`。
 
-OSS 必须允许跨域 `GET` 和 `HEAD`；公开静态资源可暂时使用来源 `*`。演示视频不进入 OSS。
+OSS 必须允许跨域 `GET` 和 `HEAD`；公开静态资源可暂时使用来源 `*`。
 
 ## 本地开发
 
 后端依赖运行在容器中，Vite 在宿主机提供热更新：
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.local up -d --build mysql mqtt mediamtx media-publisher backend
+docker compose -f docker-compose.yml -f docker-compose.dev.yml --env-file .env.local up -d --build mysql mqtt backend
 Set-Location frontend
 npm ci
 npm run dev
@@ -139,7 +133,6 @@ npm run dev
 打开 <http://127.0.0.1:5173>。开发覆盖配置默认映射：
 
 - 后端：`8095`
-- MediaMTX HTTP：`8889`
 - MySQL：`3306`
 - MQTT：`1883`
 
@@ -170,7 +163,7 @@ docker compose --env-file .env.local ps
 docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.local up -d --build
 ```
 
-生产默认最多运行 12 个访客任务并允许 100 人排队。正式部署前必须更换数据库密码和 Cookie 密钥，并设置正确的百度 AK 白名单与 WebRTC 外部地址。
+生产默认最多运行 12 个访客任务并允许 100 人排队。生产配置要求显式填写数据库密码、Cookie 密钥和浏览器地图 AK；业务端口仅监听 `127.0.0.1:8088`，由宿主机 Nginx 提供域名、HTTPS、真实访客 IP 与公网限流。Ubuntu 22.04 的完整部署顺序见[公网部署说明](docs/deployment-ubuntu22.md)。
 
 ## 主要接口
 
@@ -195,10 +188,9 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.
 ```text
 backend/                   Spring Boot 权威仿真与 Flyway 迁移
 database/                  数据库维护说明
-deploy/                    MQTT、MediaMTX 与媒体发布配置
+deploy/                    MQTT 配置
 docs/                      产品规划、ADR、三维资产说明
 frontend/                  Vue 3、MapV Three 与 Three.js 前端
-media/                     配送视角演示视频
 docker-compose.yml         基础容器编排
 docker-compose.dev.yml     本地开发端口覆盖
 docker-compose.prod.yml    生产资源与安全默认值
@@ -209,12 +201,12 @@ docker-compose.prod.yml    生产资源与安全默认值
 - 仅建设合肥试点区域。
 - 建筑轮廓与高度碰撞当前标记为 `NOT_EVALUATED`。
 - 真实设备命令 Transport 与 ACK 未接入，人工批准不会直接控制现实设备。
-- DeepSeek 只解释服务端计算结果，不能修改方案数值、资格或排名。
 - 未明确授权的第三方资产不得进入公开交付。
 
 ## 相关文档
 
 - [产品规划入口](docs/strategy-sandbox/README.md)
+- [Ubuntu 22.04 公网部署说明](docs/deployment-ubuntu22.md)
 - [长期建设指引](docs/strategy-sandbox/城市空地协同物流运营沙盘_长期建设指引_v2.0.md)
 - [Fleet Hub ADR](docs/strategy-sandbox/ADR-001-fleet-hub-foundation.md)
 - [3D 模型资产库](docs/3d-model-library.md)

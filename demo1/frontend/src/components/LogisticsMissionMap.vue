@@ -43,7 +43,7 @@ import { runtimeConfig, staticAssetCandidates } from '../config/runtime'
 import { createBaiduCyberProvider } from '../config/baiduCyberMap'
 import { ACTIVE_MODEL_ROLES, getModelAsset, mapPresentationForAsset } from '../config/modelAssets.mjs'
 import { centerSceneForTransform } from '../utils/modelSceneTransforms.mjs'
-import { missionOverviewCamera, missionViewportOptions, plannerAwareViewportPoints } from '../utils/missionViewport.mjs'
+import { missionOverviewCamera, missionViewportOptions, plannerAwareViewportPoints, planningPreviewViewportOptions } from '../utils/missionViewport.mjs'
 import { resolveAirspaceActivation, visibleAirspaceConflicts } from '../utils/airspaceVisibility.mjs'
 import {
   adjustFollowZoomScale,
@@ -1524,7 +1524,9 @@ function updateRoutes() {
       : viewportPoints
     engine.map.setHeading(OVERVIEW.heading)
     engine.map.setPitch(OVERVIEW.pitch)
-    engine.map.setViewport(focusPoints, missionViewportOptions())
+    engine.map.setViewport(focusPoints, props.planningPreview
+      ? planningPreviewViewportOptions()
+      : missionViewportOptions())
     fitted = true
   }
   engine.requestRender()

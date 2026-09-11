@@ -65,36 +65,5 @@ export function mergeDemoDelta(snapshot, eventType, delta) {
     next.mission = { ...(snapshot.mission || {}), economy: delta.economy }
     return next
   }
-  if (eventType === 'advisory-delta') {
-    if (!delta.advisory?.id) return null
-    const advisories = Array.isArray(snapshot.advisories) ? [...snapshot.advisories] : []
-    const index = advisories.findIndex(item => String(item.id) === String(delta.advisory.id))
-    if (index >= 0) advisories[index] = delta.advisory
-    else advisories.push(delta.advisory)
-    next.advisories = advisories.slice(-20)
-    return next
-  }
-  if (eventType === 'decision-ack') {
-    if (!delta.decision?.id) return null
-    const decisions = Array.isArray(snapshot.decisions) ? [...snapshot.decisions] : []
-    const index = decisions.findIndex(item => String(item.id) === String(delta.decision.id))
-    if (index >= 0) decisions[index] = delta.decision
-    else decisions.push(delta.decision)
-    next.decisions = decisions.slice(-20)
-    const mission = { ...(snapshot.mission || {}) }
-    const previous = mission.decisionSummary || {}
-    const uniqueAdvisories = new Set(next.decisions.map(item => item.advisoryId))
-    mission.decisionSummary = {
-      ...previous,
-      decisionCount: next.decisions.length,
-      approvedCount: next.decisions.filter(item => item.status === 'PLAN_APPROVED').length,
-      rejectedCount: next.decisions.filter(item => item.status === 'REJECTED').length,
-      pendingCount: Math.max(0, Number(previous.advisoryCount || 0) - uniqueAdvisories.size),
-      executionBlocked: next.decisions.some(item => item.status === 'PLAN_APPROVED'),
-      latestDecision: delta.decision
-    }
-    next.mission = mission
-    return next
-  }
   return null
 }

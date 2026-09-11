@@ -58,6 +58,14 @@ export function missionViewportOptions({ range = 120, zoom = 0 } = {}) {
   }
 }
 
+export function planningPreviewViewportOptions() {
+  // At the overview pitch MapVThree's geometric fit leaves the delivery plan
+  // visually compressed. 1.45 zoom levels make the fitted bounds occupy
+  // about 2.7x more screen space while the planner-aware west padding keeps
+  // every route and airspace volume clear of the left-hand planning panel.
+  return missionViewportOptions({ zoom: 1.45 })
+}
+
 export function plannerAwareViewportPoints(points = [], { panelWidth = 0, viewportWidth = 0 } = {}) {
   const values = finitePoints(points)
   if (values.length < 2 || panelWidth <= 0 || viewportWidth <= 0) return values

@@ -1,5 +1,21 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+
+const frontendRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+test('MapV build copies only the runtime asset whitelist', () => {
+  const viteConfig = readFileSync(join(frontendRoot, 'vite.config.js'), 'utf8')
+  for (const asset of [
+    'textures/water/foam_noise.webp',
+    'models/effect/diamond.glb',
+    'workers/BaiduVectorParser.worker-c827f410.js'
+  ]) assert.match(viteConfig, new RegExp(asset.replaceAll('.', '\\.')))
+  assert.doesNotMatch(viteConfig, /cpSync\(mapvAssetsSource,[\s\S]*recursive:\s*true/)
+  assert.doesNotMatch(viteConfig, /fallback-media|VITE_MEDIA_TARGET/)
+})
 
 test('OSS static asset URLs keep the local public path as a fallback', async () => {
   globalThis.window = {

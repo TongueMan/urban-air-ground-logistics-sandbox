@@ -75,6 +75,7 @@ test('mission briefing exposes only the player-facing airspace count and fleet s
   assert.match(planner, /airspaceThemeCount/)
   assert.match(planner, /禁飞区数量/)
   assert.match(planner, /\[2, 3, 4\]/)
+  assert.match(planner, /\.zone-count-picker label\{[^}]*align-items:center[^}]*justify-content:center/)
   assert.doesNotMatch(planner, /高级设置|开发者信息|订单密度|飞行高度|最长时限|返航余量/)
   assert.match(planner, /开始配送/)
   assert.match(planner, /换一个任务/)
@@ -127,7 +128,8 @@ test('static active airspace is visible at simulation zero while dynamic airspac
   assert.equal(resolveAirspaceActivation({ state: 'ACTIVE', dynamic: true, activationRatio: 0 }), 0)
   assert.equal(resolveAirspaceActivation({ state: 'SCHEDULED', dynamic: true, activationRatio: 1 }), 0)
   assert.equal(resolveAirspaceActivation({ state: 'ACTIVATING', dynamic: true, activationRatio: 0 }), .05)
-  assert.match(missionMap, /setViewport\(focusPoints, missionViewportOptions\(\)\)/)
+  assert.match(missionMap, /setViewport\(focusPoints, props\.planningPreview/)
+  assert.match(missionMap, /planningPreviewViewportOptions\(\)/)
   assert.match(missionMap, /AIRSPACE_LABEL_ALTITUDE_METERS = 12/)
   assert.match(missionMap, /CONFLICT_LABEL_ALTITUDE_METERS = 18/)
   assert.match(missionMap, /cycleAnchorSimulationMs/)
@@ -216,10 +218,6 @@ test('planned UAV route uses the frozen executable polyline without logistics in
   assert.doesNotMatch(missionMap, /randomized === true|kind:\s*['"]INCIDENT['"]|is-incident/)
   assert.match(planner, /互动空域/)
   assert.doesNotMatch(planner, /随机(?:任务|运营)情况|randomSituationCount/)
-})
-
-test('spatial mission screen keeps the temporary live video window disabled', () => {
-  assert.doesNotMatch(spatialScreen, /<LiveLens\s*\/>/)
 })
 
 test('digital airspace renders multi-volume corridors, threat styling and runtime actions', () => {

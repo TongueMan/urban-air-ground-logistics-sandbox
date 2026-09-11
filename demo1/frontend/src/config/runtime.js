@@ -15,8 +15,6 @@ export const runtimeConfig = Object.freeze({
   apiBase: trimTrailingSlash(raw.apiBase),
   wsBase: trimTrailingSlash(raw.wsBase),
   visionBase: trimTrailingSlash(raw.visionBase),
-  mediaBase: trimTrailingSlash(raw.mediaBase || devEnv.VITE_MEDIA_BASE || '/media'),
-  mediaPathPrefix: String(raw.mediaPathPrefix || '').replace(/^\/+|\/+$/g, ''),
   staticAssetBase,
   smartCityAssetBase,
   parkingImageBase: trimTrailingSlash(
@@ -34,12 +32,6 @@ export function apiUrl(path) {
 
 export function visionUrl(path) {
   return `${runtimeConfig.visionBase}/${String(path).replace(/^\/+/, '')}`
-}
-
-export function mediaUrl(path) {
-  const normalizedPath = String(path).replace(/^\/+/, '')
-  const prefix = runtimeConfig.mediaPathPrefix ? `${runtimeConfig.mediaPathPrefix}/` : ''
-  return `${runtimeConfig.mediaBase}/${prefix}${normalizedPath}`
 }
 
 export function smartCityAssetUrl(path) {
@@ -74,9 +66,4 @@ export function parkingImageUrl(imageKey) {
 export function websocketUrl(path) {
   const base = runtimeConfig.wsBase || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
   return `${base}/${String(path).replace(/^\/+/, '')}`
-}
-
-export function mediaAuthHeaders(token, headers = {}) {
-  if (runtimeConfig.environment === 'dev' || !token) return headers
-  return { ...headers, Authorization: `Bearer ${token}` }
 }

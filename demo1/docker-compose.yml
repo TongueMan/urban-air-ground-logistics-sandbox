@@ -34,35 +34,6 @@ services:
       retries: 20
     networks: [demo-net]
 
-  mediamtx:
-    image: bluenviron/mediamtx@sha256:12ed3d5aabb589ce21895a11b58c6b58b988b6dc3c89283dc31d6689381f3272
-    restart: unless-stopped
-    environment:
-      MTX_WEBRTCADDITIONALHOSTS: ${MEDIA_WEBRTC_ADDITIONAL_HOSTS:-127.0.0.1}
-      MTX_WEBRTCLOCALTCPADDRESS: :8189
-      MTX_HLS: "no"
-    ports:
-      - "8189:8189/udp"
-      - "8189:8189/tcp"
-    networks: [demo-net]
-
-  media-publisher:
-    build: ./deploy/media-publisher
-    restart: unless-stopped
-    depends_on:
-      mediamtx:
-        condition: service_started
-    environment:
-      MEDIA_RTSP_HOST: mediamtx
-    volumes:
-      - ./media:/media-input:ro
-    healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/skyfleet-media.ready"]
-      interval: 5s
-      timeout: 2s
-      retries: 20
-    networks: [demo-net]
-
   backend:
     build: ./backend
     restart: unless-stopped
@@ -89,12 +60,6 @@ services:
       BAIDU_ROUTE_BASE_URL: ${BAIDU_ROUTE_BASE_URL:-https://api.map.baidu.com}
       BAIDU_ROUTE_CONNECT_TIMEOUT_SECONDS: ${BAIDU_ROUTE_CONNECT_TIMEOUT_SECONDS:-3}
       BAIDU_ROUTE_RESPONSE_TIMEOUT_SECONDS: ${BAIDU_ROUTE_RESPONSE_TIMEOUT_SECONDS:-6}
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
-      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
-      DEEPSEEK_TIMEOUT_SECONDS: ${DEEPSEEK_TIMEOUT_SECONDS:-20}
-      AI_MAX_ADVISORIES_PER_SESSION: ${AI_MAX_ADVISORIES_PER_SESSION:-5}
-      AI_MIN_INTERVAL_SECONDS: ${AI_MIN_INTERVAL_SECONDS:-10}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8095/actuator/health | grep -q '\"status\":\"UP\"'"]
       interval: 5s
@@ -109,18 +74,11 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-      mediamtx:
-        condition: service_started
-      media-publisher:
-        condition: service_healthy
     environment:
       FRONTEND_BAIDU_MAP_AK: ${FRONTEND_BAIDU_MAP_AK:-}
-      FRONTEND_MEDIA_BASE: /media
       FRONTEND_STATIC_ASSET_BASE: ${FRONTEND_STATIC_ASSET_BASE:-https://java-tongueman.oss-cn-beijing.aliyuncs.com/%E5%9F%8E%E5%B8%82%E7%A9%BA%E5%9C%B0%E5%8D%8F%E5%90%8C%E7%89%A9%E6%B5%81%E8%BF%90%E8%90%A5%E6%B2%99%E7%9B%98}
-    volumes:
-      - ./media:/usr/share/nginx/html/fallback-media:ro
     ports:
-      - "${DEMO_HTTP_PORT:-8088}:8080"
+      - "127.0.0.1:${DEMO_HTTP_PORT:-8088}:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/healthz | grep -q ok"]
       interval: 5s

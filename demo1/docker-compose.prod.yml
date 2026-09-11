@@ -1,3 +1,9 @@
+x-production-logging: &production-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   mysql:
     mem_limit: 700m
@@ -7,22 +13,27 @@ services:
       - --collation-server=utf8mb4_0900_ai_ci
       - --innodb-buffer-pool-size=256M
       - --max-connections=80
+    environment:
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in the production env file}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in the production env file}
+    logging: *production-logging
   mqtt:
     mem_limit: 96m
     cpus: 0.10
-  mediamtx:
-    mem_limit: 128m
-    cpus: 0.15
-  media-publisher:
-    mem_limit: 256m
-    cpus: 0.25
+    logging: *production-logging
   backend:
     mem_limit: 900m
     cpus: 0.65
     environment:
       JAVA_TOOL_OPTIONS: -Xms128m -Xmx560m
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Set MYSQL_PASSWORD in the production env file}
+      DEMO_COOKIE_SECRET: ${DEMO_COOKIE_SECRET:?Set DEMO_COOKIE_SECRET in the production env file}
       DEMO_MAX_ACTIVE_SESSIONS: ${DEMO_MAX_ACTIVE_SESSIONS:-12}
-      FLEET_DEV_PRICING_ENABLED: ${FLEET_DEV_PRICING_ENABLED:-false}
+      FLEET_DEV_PRICING_ENABLED: "false"
+    logging: *production-logging
   frontend:
     mem_limit: 128m
     cpus: 0.20
+    environment:
+      FRONTEND_BAIDU_MAP_AK: ${FRONTEND_BAIDU_MAP_AK:?Set FRONTEND_BAIDU_MAP_AK in the production env file}
+    logging: *production-logging

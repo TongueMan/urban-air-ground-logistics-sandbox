@@ -157,6 +157,8 @@ test('renders character lines in system speech bubbles instead of figure caption
   }
   assert.ok(MISSION_SETTLEMENT_DIALOGUE.anan)
   assert.ok(MISSION_SETTLEMENT_DIALOGUE.cheng)
+  assert.equal(MISSION_SETTLEMENT_DIALOGUE.cheng, '任务拿下，背阔肌也得有镜头！')
+  assert.doesNotMatch(MISSION_SETTLEMENT_DIALOGUE.cheng, /背肌/)
   assert.match(overlay, /tutorialMissionReactionsSuppressed/)
   assert.match(overlay, /if \(!transaction \|\| runtime\.tutorialMissionReactionsSuppressed\?\.value\) return/)
   assert.match(overlay, /runtime\.tutorialMissionReactionsSuppressed\?\.value \|\| replay/)

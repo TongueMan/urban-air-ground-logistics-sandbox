@@ -1,5 +1,5 @@
 import { computed, onBeforeUnmount, readonly, ref } from 'vue'
-import { changeSpeed, createSession, executeAirspaceAction as postAirspaceAction, executeSignalCommand as postSignalCommand, generateTaskInstance, getCurrentSession, getMission, getRunReplay, getScenarioTemplates, getTaskHistory, requestSignalAdvisory, restoreRewindCheckpoint as postRestoreRewindCheckpoint, runEventsUrl, sessionEventsUrl, startTaskRun, stopSession, submitAdvisoryDecision as postAdvisoryDecision } from '../../api/demo'
+import { changeSpeed, createSession, executeAirspaceAction as postAirspaceAction, executeSignalCommand as postSignalCommand, generateTaskInstance, getCurrentSession, getMission, getRunReplay, getScenarioTemplates, getTaskHistory, restoreRewindCheckpoint as postRestoreRewindCheckpoint, runEventsUrl, sessionEventsUrl, startTaskRun, stopSession } from '../../api/demo'
 import { createMissionContext } from '../context/createMissionContext'
 import { mergeDemoDelta } from '../adapters/mergeDemoDelta.mjs'
 
@@ -19,12 +19,6 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   const signalCommandBusy = ref(false)
   const signalCommandError = ref('')
   const lastCommandAck = ref(null)
-  const advisoryBusy = ref(false)
-  const advisoryError = ref('')
-  const currentAdvisory = ref(null)
-  const decisionBusy = ref(false)
-  const decisionError = ref('')
-  const lastDecisionAck = ref(null)
   const scenarioTemplates = ref([])
   const taskPreview = ref(null)
   const tutorialGenerationPreset = ref(null)
@@ -56,8 +50,6 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
       timeScale.value = nextScale
       if (nextScale > 0) lastActiveTimeScale.value = nextScale
     }
-    if (Array.isArray(payload.advisories) && payload.advisories.length) currentAdvisory.value = payload.advisories.at(-1)
-    if (Array.isArray(payload.decisions) && payload.decisions.length) lastDecisionAck.value = payload.decisions.at(-1)
     if (mergeEconomy && payload.mission?.economy) onEconomy?.(payload.mission.economy)
   }
 
@@ -85,8 +77,6 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     }
     applySnapshot(merged)
     if (type === 'command-ack') lastCommandAck.value = delta.command
-    if (type === 'advisory-delta') currentAdvisory.value = delta.advisory
-    if (type === 'decision-ack') lastDecisionAck.value = delta.decision
     if (type === 'economy-delta') {
       latestEconomyTransaction.value = delta.transaction ? { ...delta.transaction, receivedAt: Date.now() } : null
       onEconomy?.(delta.economy)
@@ -109,7 +99,7 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
       notice.value = ''
       applySnapshot(JSON.parse(event.data))
     })
-    ;['mission-delta', 'track-delta', 'signal-delta', 'command-ack', 'advisory-delta', 'decision-ack', 'airspace-delta', 'airspace-warning', 'economy-delta', 'rewind-checkpoint'].forEach(type => {
+    ;['mission-delta', 'track-delta', 'signal-delta', 'command-ack', 'airspace-delta', 'airspace-warning', 'economy-delta', 'rewind-checkpoint'].forEach(type => {
       eventSource.addEventListener(type, event => applyDelta(type, event))
     })
     eventSource.addEventListener('session-end', event => {
@@ -332,11 +322,7 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
       latestEconomyTransaction.value = null
       latestAirspaceWarning.value = null
       lastCommandAck.value = null
-      currentAdvisory.value = null
-      lastDecisionAck.value = null
       signalCommandError.value = ''
-      advisoryError.value = ''
-      decisionError.value = ''
       lastRewindAck.value = result.rewind
       applySnapshot(result.snapshot)
       context.returnToLive()
@@ -400,41 +386,6 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     }
   }
 
-  async function generateSignalAdvisory(signalId, objective = 'BALANCED') {
-    if (!session.value?.id || !signalId) return null
-    advisoryBusy.value = true
-    advisoryError.value = ''
-    const advisoryId = globalThis.crypto?.randomUUID?.() || `advisory-${Date.now()}-${Math.random().toString(16).slice(2)}`
-    try {
-      currentAdvisory.value = await requestSignalAdvisory(session.value.id, signalId, advisoryId, objective)
-      lastDecisionAck.value = null
-      return currentAdvisory.value
-    } catch (error) {
-      advisoryError.value = error.message
-      throw error
-    } finally {
-      advisoryBusy.value = false
-    }
-  }
-
-  async function submitAdvisoryDecision(signalId, advisoryId, type, optionId, expectedAdvisoryStatus) {
-    if (!session.value?.id || !signalId || !advisoryId || !optionId) return null
-    decisionBusy.value = true
-    decisionError.value = ''
-    const decisionId = globalThis.crypto?.randomUUID?.() || `decision-${Date.now()}-${Math.random().toString(16).slice(2)}`
-    try {
-      lastDecisionAck.value = await postAdvisoryDecision(session.value.id, signalId, advisoryId, {
-        decisionId, type, optionId, expectedAdvisoryStatus
-      })
-      return lastDecisionAck.value
-    } catch (error) {
-      decisionError.value = error.message
-      throw error
-    } finally {
-      decisionBusy.value = false
-    }
-  }
-
   function selectAirspace(volumeId) {
     if (tutorialRedConflictLocked.value && isAbsoluteNoFlyVolume(volumeId)) return false
     context.closeActionMode()
@@ -482,12 +433,6 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     signalCommandBusy,
     signalCommandError,
     lastCommandAck,
-    advisoryBusy,
-    advisoryError,
-    currentAdvisory,
-    decisionBusy,
-    decisionError,
-    lastDecisionAck,
     scenarioTemplates,
     taskPreview,
     tutorialGenerationPreset: readonly(tutorialGenerationPreset),
@@ -533,8 +478,6 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     prepareNewDelivery,
     endMission,
     executeSignalCommand,
-    generateSignalAdvisory,
-    submitAdvisoryDecision,
     selectAirspace,
     closeAirspace,
     executeAirspaceAction,
@@ -556,7 +499,6 @@ function previewDevices(plan = {}) {
       actorKind: actor.kind,
       actorRole: actor.role,
       capabilities: actor.capabilities || [],
-      mediaSources: actor.mediaSources || [],
       longitude: Number(point[0]), latitude: Number(point[1]), altitude: actor.kind === 'UAV' ? Number(point[2] || 0) + 2 : Number(point[2] || 0),
       sensorData: { missionPhase: 'DOCKED', routeProgress: 0, routeDeviationMeters: 0, battery: actor.initialBattery || 100, linkQuality: 100, deliveryProgressPercent: 0 }
     }

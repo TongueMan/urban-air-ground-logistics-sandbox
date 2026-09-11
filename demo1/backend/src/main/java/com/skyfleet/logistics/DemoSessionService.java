@@ -41,8 +41,6 @@ public class DemoSessionService {
     private final MqttBridge mqtt;
     private final TaskTrafficEngine trafficLights;
     private final TaskInstanceService taskInstances;
-    private final MissionAdvisoryService advisories;
-    private final MissionDecisionService decisions;
     private final FleetService fleet;
     private final int maxActive;
     private final int maxQueue;
@@ -56,12 +54,12 @@ public class DemoSessionService {
 
     public DemoSessionService(MissionCatalog catalog, JdbcTemplate jdbc, ObjectMapper mapper, MqttBridge mqtt,
                                TaskTrafficEngine trafficLights, TaskInstanceService taskInstances,
-                               MissionAdvisoryService advisories, MissionDecisionService decisions, FleetService fleet,
+                               FleetService fleet,
                               @Value("${demo.max-active-sessions}") int maxActive,
                               @Value("${demo.max-queue-size}") int maxQueue,
                               @Value("${demo.session-duration-seconds}") int durationSeconds,
                               @Value("${demo.disconnect-expiry-seconds}") int disconnectExpirySeconds) {
-        this.catalog = catalog; this.jdbc = jdbc; this.mapper = mapper; this.mqtt = mqtt; this.trafficLights = trafficLights; this.taskInstances = taskInstances; this.advisories = advisories; this.decisions = decisions; this.fleet = fleet;
+        this.catalog = catalog; this.jdbc = jdbc; this.mapper = mapper; this.mqtt = mqtt; this.trafficLights = trafficLights; this.taskInstances = taskInstances; this.fleet = fleet;
         this.maxActive = maxActive; this.maxQueue = maxQueue; this.durationSeconds = durationSeconds;
         this.disconnectExpirySeconds = disconnectExpirySeconds;
     }
@@ -146,43 +144,6 @@ public class DemoSessionService {
     }
 
     public Map<String, Object> mission(String id, String visitorHash) { DemoSession session = owned(id, visitorHash); touch(session); return snapshot(session, true); }
-
-    public Map<String, Object> intelligenceStatus() { return advisories.providerStatus(); }
-
-    public Map<String, Object> signalAdvisory(String id, String visitorHash, String signalId, String advisoryId, String objective) {
-        DemoSession session = owned(id, visitorHash);
-        DemoSignal signal = session.signals.get(signalId);
-        if (signal == null) throw new DemoException(HttpStatus.NOT_FOUND, "Signal 尚未检出或不存在");
-        if ("SCHEDULED".equals(signal.status)) throw new DemoException(HttpStatus.CONFLICT, "Signal 尚未发生，不能生成处置建议");
-        try {
-            Map<String, Object> result = advisories.create(advisoryId, session, signal, objective);
-            session.advisories.put(String.valueOf(result.get("id")), result);
-            broadcastDelta(session, "advisory-delta", Map.of("advisory", result));
-            return result;
-        } catch (IllegalArgumentException error) {
-            throw new DemoException(HttpStatus.BAD_REQUEST, error.getMessage());
-        } catch (IllegalStateException error) {
-            throw new DemoException(HttpStatus.CONFLICT, error.getMessage());
-        }
-    }
-
-    public Map<String, Object> signalDecision(String id, String visitorHash, String signalId, String advisoryId,
-                                              String decisionId, String type, String optionId, String expectedAdvisoryStatus) {
-        DemoSession session = owned(id, visitorHash);
-        DemoSignal signal = session.signals.get(signalId);
-        if (signal == null) throw new DemoException(HttpStatus.NOT_FOUND, "Signal 尚未检出或不存在");
-        try {
-            Map<String, Object> result = decisions.create(decisionId, session, signal, advisoryId, type, optionId, expectedAdvisoryStatus);
-            boolean isNew = !session.decisions.containsKey(String.valueOf(result.get("id")));
-            session.decisions.put(String.valueOf(result.get("id")), result);
-            if (isNew) broadcastDelta(session, "decision-ack", Map.of("decision", result));
-            return result;
-        } catch (IllegalArgumentException error) {
-            throw new DemoException(HttpStatus.BAD_REQUEST, error.getMessage());
-        } catch (IllegalStateException error) {
-            throw new DemoException(HttpStatus.CONFLICT, error.getMessage());
-        }
-    }
 
     public Map<String, Object> speed(String id, String visitorHash, double timeScale) {
         DemoSession session = owned(id, visitorHash);
@@ -409,23 +370,10 @@ public class DemoSessionService {
                         result.getDouble("mission_progress"), result.getString("status"), result.getTimestamp("requested_at").toInstant(),
                         result.getTimestamp("acknowledged_at").toInstant(), result.getString("message")), session.id, fromTimestamp, toTimestamp);
 
-        List<Map<String, Object>> advisoryHistory = jdbc.query("SELECT response_json FROM demo_ai_advisory WHERE session_id=? AND requested_at>=? AND requested_at<=? AND superseded_by_rewind_id IS NULL ORDER BY requested_at,id",
-                (result, row) -> {
-                    try { return mapper.readValue(result.getString("response_json"), new TypeReference<Map<String, Object>>() {}); }
-                    catch (Exception error) { throw new IllegalStateException("Advisory 历史无法读取", error); }
-                }, session.id, fromTimestamp, toTimestamp);
-        List<Map<String, Object>> decisionHistory = jdbc.query("SELECT * FROM demo_ai_decision WHERE session_id=? AND acknowledged_at>=? AND acknowledged_at<=? AND superseded_by_rewind_id IS NULL ORDER BY acknowledged_at,id",
-                (result, row) -> MissionDecisionService.view(result.getString("id"), result.getString("advisory_id"), result.getString("session_id"),
-                        result.getString("signal_id"), result.getString("option_id"), result.getString("decision_type"),
-                        result.getString("expected_advisory_status"), result.getString("advisory_status"), result.getString("status"),
-                        result.getString("execution_status"), result.getTimestamp("requested_at").toInstant(),
-                        result.getTimestamp("acknowledged_at").toInstant(), result.getString("message")), session.id, fromTimestamp, toTimestamp);
-
         Map<String, Object> value = new LinkedHashMap<>();
         value.put("sessionId", session.id); value.put("definitionId", session.definitionId); value.put("definitionVersion", session.definitionVersion);
         value.put("from", from.toString()); value.put("to", to.toString()); value.put("actorId", actorId);
         value.put("telemetry", telemetry); value.put("events", events); value.put("commands", commands);
-        value.put("advisories", advisoryHistory); value.put("decisions", decisionHistory);
         value.put("signals", session.signals.values().stream().map(signal -> signal.publicView(session.id)).toList());
         return value;
     }
@@ -676,8 +624,6 @@ public class DemoSessionService {
         state.put("uavStates", new LinkedHashMap<>(session.uavStates));
         state.put("trafficStops", new LinkedHashMap<>(session.trafficStops));
         state.put("triggeredEvents", new ArrayList<>(session.triggeredEvents));
-        state.put("advisories", new LinkedHashMap<>(session.advisories));
-        state.put("decisions", new LinkedHashMap<>(session.decisions));
         state.put("airRouteOverrides", new LinkedHashMap<>(session.airRouteOverrides));
         state.put("airspaceActions", new LinkedHashMap<>(session.airspaceActions));
         state.put("uavWaitUntilMs", new LinkedHashMap<>(session.uavWaitUntilMs));
@@ -716,8 +662,6 @@ public class DemoSessionService {
         replaceMap(session.uavStates, state.get("uavStates"), new TypeReference<Map<String, String>>() {});
         replaceMap(session.trafficStops, state.get("trafficStops"), new TypeReference<Map<String, Map<String, Object>>>() {});
         replaceSet(session.triggeredEvents, state.get("triggeredEvents"));
-        replaceMap(session.advisories, state.get("advisories"), new TypeReference<Map<String, Map<String, Object>>>() {});
-        replaceMap(session.decisions, state.get("decisions"), new TypeReference<Map<String, Map<String, Object>>>() {});
         replaceMap(session.airRouteOverrides, state.get("airRouteOverrides"), new TypeReference<Map<String, List<List<Number>>>>() {});
         replaceMap(session.airspaceActions, state.get("airspaceActions"), new TypeReference<Map<String, Map<String, Object>>>() {});
         replaceMap(session.uavWaitUntilMs, state.get("uavWaitUntilMs"), new TypeReference<Map<String, Long>>() {});
@@ -768,10 +712,6 @@ public class DemoSessionService {
         jdbc.update("UPDATE demo_signal SET superseded_by_rewind_id=? WHERE session_id=? AND timeline_epoch=? AND detected_at>=? AND superseded_by_rewind_id IS NULL",
                 rewindId, session.id, sourceEpoch, createdAt);
         jdbc.update("UPDATE demo_workflow_command SET superseded_by_rewind_id=? WHERE session_id=? AND timeline_epoch=? AND requested_at>=? AND superseded_by_rewind_id IS NULL",
-                rewindId, session.id, sourceEpoch, createdAt);
-        jdbc.update("UPDATE demo_ai_advisory SET superseded_by_rewind_id=? WHERE session_id=? AND timeline_epoch=? AND requested_at>=? AND superseded_by_rewind_id IS NULL",
-                rewindId, session.id, sourceEpoch, createdAt);
-        jdbc.update("UPDATE demo_ai_decision SET superseded_by_rewind_id=? WHERE session_id=? AND timeline_epoch=? AND requested_at>=? AND superseded_by_rewind_id IS NULL",
                 rewindId, session.id, sourceEpoch, createdAt);
         jdbc.update("UPDATE demo_airspace_action SET superseded_by_rewind_id=? WHERE session_id=? AND timeline_epoch=? AND simulation_time_ms>=? AND superseded_by_rewind_id IS NULL",
                 rewindId, session.id, sourceEpoch, at);
@@ -1237,7 +1177,7 @@ public class DemoSessionService {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("sessionId", session.id); payload.put("deviceId", deviceId); payload.put("deviceType", actor.get("deviceType"));
         payload.put("deviceName", actor.get("name")); payload.put("actorKind", actor.get("kind")); payload.put("actorRole", actor.get("role"));
-        payload.put("capabilities", actor.getOrDefault("capabilities", List.of())); payload.put("mediaSources", actor.getOrDefault("mediaSources", List.of()));
+        payload.put("capabilities", actor.getOrDefault("capabilities", List.of()));
         payload.put("formationId", actor.get("formationId")); payload.put("assignmentId", actor.get("assignmentId"));
         payload.put("commandCapabilities", actor.getOrDefault("commandCapabilities", List.of())); payload.put("commandTransport", unavailableCommandTransport());
         payload.put("eventTime", now.toString()); payload.put("longitude", point[0]); payload.put("latitude", point[1]); payload.put("altitude", point[2]); payload.put("metrics", metrics);
@@ -1290,13 +1230,10 @@ public class DemoSessionService {
         mission.put("airspace", airspaceRuntime(session, mission));
         if (session.taskInstanceId != null) mission.put("economy", economyView(session));
         mission.put("timeline", timelineView(session));
-        mission.put("decisionSummary", decisionSummary(session));
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("revision", session.revision.get()); result.put("session", session.publicView()); result.put("mission", mission);
         result.put("devices", session.devices.isEmpty() ? standbyDevices(session) : session.deviceList());
         result.put("signals", signalViews(session, events));
-        result.put("advisories", orderedValues(session.advisories, "completedAt"));
-        result.put("decisions", orderedValues(session.decisions, "acknowledgedAt"));
         return result;
     }
 
@@ -1493,26 +1430,6 @@ public class DemoSessionService {
                     signal.recordStatus(result.getString("result_signal_status"), result.getDouble("mission_progress"),
                             result.getTimestamp("acknowledged_at").toInstant());
                 });
-        jdbc.query("SELECT a.id,a.session_id,a.response_json FROM demo_ai_advisory a JOIN demo_session s ON s.id=a.session_id WHERE s.created_at > NOW() - INTERVAL 24 HOUR AND a.superseded_by_rewind_id IS NULL ORDER BY a.requested_at",
-                result -> {
-                    DemoSession session = sessions.get(result.getString("session_id"));
-                    if (session == null) return;
-                    try {
-                        Map<String, Object> advisory = mapper.readValue(result.getString("response_json"), new TypeReference<>() {});
-                        session.advisories.put(result.getString("id"), advisory);
-                    } catch (Exception ignored) {}
-                });
-        jdbc.query("SELECT d.* FROM demo_ai_decision d JOIN demo_session s ON s.id=d.session_id WHERE s.created_at > NOW() - INTERVAL 24 HOUR AND d.superseded_by_rewind_id IS NULL ORDER BY d.acknowledged_at",
-                result -> {
-                    DemoSession session = sessions.get(result.getString("session_id"));
-                    if (session == null) return;
-                    Map<String, Object> decision = MissionDecisionService.view(result.getString("id"), result.getString("advisory_id"), result.getString("session_id"),
-                            result.getString("signal_id"), result.getString("option_id"), result.getString("decision_type"),
-                            result.getString("expected_advisory_status"), result.getString("advisory_status"), result.getString("status"),
-                            result.getString("execution_status"), result.getTimestamp("requested_at").toInstant(),
-                            result.getTimestamp("acknowledged_at").toInstant(), result.getString("message"));
-                    session.decisions.put(result.getString("id"), decision);
-                });
         jdbc.query("SELECT * FROM demo_airspace_action WHERE superseded_by_rewind_id IS NULL ORDER BY created_at", result -> {
             DemoSession session = sessions.get(result.getString("session_id"));
             if (session == null) return;
@@ -1538,25 +1455,6 @@ public class DemoSessionService {
         });
     }
 
-    private static List<Map<String, Object>> orderedValues(Map<String, Map<String, Object>> values, String timeField) {
-        return values.values().stream()
-                .sorted(Comparator.comparing(value -> String.valueOf(value.getOrDefault(timeField, ""))))
-                .skip(Math.max(0, values.size() - 20L)).toList();
-    }
-
-    private static Map<String, Object> decisionSummary(DemoSession session) {
-        long approved = session.decisions.values().stream().filter(value -> "PLAN_APPROVED".equals(value.get("status"))).count();
-        long rejected = session.decisions.values().stream().filter(value -> "REJECTED".equals(value.get("status"))).count();
-        Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("advisoryCount", session.advisories.size()); summary.put("decisionCount", session.decisions.size());
-        summary.put("approvedCount", approved); summary.put("rejectedCount", rejected);
-        summary.put("pendingCount", Math.max(0, session.advisories.size() - session.decisions.size()));
-        summary.put("executionBlocked", approved > 0);
-        session.decisions.values().stream()
-                .max(Comparator.comparing(value -> String.valueOf(value.getOrDefault("acknowledgedAt", ""))))
-                .ifPresent(value -> summary.put("latestDecision", value));
-        return summary;
-    }
     private Map<String, Object> actorMetadata(DemoSession session, String actorId) {
         try { return actor(session, actorId); }
         catch (Exception ignored) { return Map.of(); }
@@ -1934,7 +1832,7 @@ public class DemoSessionService {
     private static void copyActorMetadata(Map<String, Object> source, Map<String, Object> target) {
         Map<String, String> fields = Map.of(
                 "kind", "actorKind", "role", "actorRole", "formationId", "formationId", "assignmentId", "assignmentId",
-                "capabilities", "capabilities", "mediaSources", "mediaSources", "commandCapabilities", "commandCapabilities");
+                "capabilities", "capabilities", "commandCapabilities", "commandCapabilities");
         fields.forEach((sourceKey, targetKey) -> { if (source.containsKey(sourceKey) && source.get(sourceKey) != null) target.put(targetKey, source.get(sourceKey)); });
         if (source.containsKey("actorKind")) target.put("actorKind", source.get("actorKind"));
         if (source.containsKey("actorRole")) target.put("actorRole", source.get("actorRole"));

@@ -35,26 +35,6 @@ test('rejects revision gaps and ignores already applied events', () => {
   assert.equal(mergeDemoDelta(value, 'mission-delta', { revision: 4, mission: { progress: 30 } }), value)
 })
 
-test('merges an audited advisory delta without changing mission state', () => {
-  const value = baseline()
-  const advisory = { id: 'ADV-1', signalId: 'S1', status: 'DETERMINISTIC_ONLY', executable: false }
-  const merged = mergeDemoDelta(value, 'advisory-delta', { revision: 5, advisory })
-  assert.equal(merged.revision, 5)
-  assert.deepEqual(merged.advisories, [advisory])
-  assert.equal(merged.mission.progress, 20)
-})
-
-test('merges an idempotent human decision ack without implying device execution', () => {
-  const value = { ...baseline(), advisories: [{ id: 'ADV-1' }], decisions: [] }
-  value.mission = { ...value.mission, decisionSummary: { advisoryCount: 1, pendingCount: 1 } }
-  const decision = { id: 'DEC-1', advisoryId: 'ADV-1', status: 'PLAN_APPROVED', executionStatus: 'BLOCKED' }
-  const merged = mergeDemoDelta(value, 'decision-ack', { revision: 5, decision })
-  assert.deepEqual(merged.decisions, [decision])
-  assert.equal(merged.mission.decisionSummary.pendingCount, 0)
-  assert.equal(merged.mission.decisionSummary.executionBlocked, true)
-  assert.equal(merged.mission.progress, 20)
-})
-
 test('merges airspace lifecycle and conflict deltas', () => {
   const previous = { revision: 8, mission: { airspace: { runtimeVolumes: [] } }, devices: [] }
   const airspace = { runtimeVolumes: [{ id: 'TNFZ-001', state: 'ACTIVE', threatLevel: 'CONFLICT' }], conflicts: [{ volumeId: 'TNFZ-001' }] }

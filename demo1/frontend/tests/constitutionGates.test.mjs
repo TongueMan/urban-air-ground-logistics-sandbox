@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'src')
+const frontendRoot = join(root, '..')
+const projectRoot = join(frontendRoot, '..')
 
 function filesUnder(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
@@ -102,10 +104,9 @@ test('application enters through MissionContext and the spatial screen', () => {
   assert.match(app, /SpatialMissionScreen/)
 })
 
-test('mission action layer contains control only and no signal advisory cards', () => {
+test('mission action layer exposes mission control', () => {
   const action = readFileSync(join(root, 'components', 'action', 'ActionLayer.vue'), 'utf8')
   assert.match(action, /ACTION \/ MISSION CONTROL/)
-  assert.doesNotMatch(action, /SIGNAL \/|MISSION COPILOT|生成候选方案|确认异常|忽略异常/)
 })
 
 test('mission side drawers are mutually exclusive and stale formation members are filtered', () => {
@@ -115,4 +116,26 @@ test('mission side drawers are mutually exclusive and stale formation members ar
   assert.match(state, /function openMissionControl\(\)[\s\S]*runtime\.closeAirspace\(\)[\s\S]*context\.openActionMode\('CONTROL'\)/)
   assert.match(runtime, /function selectAirspace\(volumeId\)[\s\S]*context\.closeActionMode\(\)/)
   assert.match(dock, /visibleFormations[\s\S]*filter\(member => Boolean\(mission\.value\.actorsById\?\.\[member\.actorId\]\)\)/)
+})
+
+test('production ingress preserves proxy identity and stays bound to localhost', () => {
+  const containerNginx = readFileSync(join(frontendRoot, 'deploy', 'nginx.conf'), 'utf8')
+  const publicNginx = readFileSync(join(projectRoot, 'deploy', 'nginx', 'skyfleet.conf.example'), 'utf8')
+  const compose = readFileSync(join(projectRoot, 'docker-compose.yml'), 'utf8')
+  const productionCompose = readFileSync(join(projectRoot, 'docker-compose.prod.yml'), 'utf8')
+  const envExample = readFileSync(join(projectRoot, '.env.example'), 'utf8')
+
+  assert.match(containerNginx, /proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for/)
+  assert.match(containerNginx, /\$http_x_forwarded_proto \$skyfleet_forwarded_proto/)
+  assert.match(compose, /127\.0\.0\.1:\$\{DEMO_HTTP_PORT:-8088\}:8080/)
+  assert.match(publicNginx, /listen 443 ssl/)
+  assert.match(publicNginx, /limit_req zone=skyfleet_api/)
+  assert.match(publicNginx, /proxy_pass http:\/\/skyfleet_app/)
+  assert.match(publicNginx, /proxy_buffering off/)
+  assert.match(productionCompose, /MYSQL_PASSWORD:\s*\$\{MYSQL_PASSWORD:\?/)
+  assert.match(productionCompose, /DEMO_COOKIE_SECRET:\s*\$\{DEMO_COOKIE_SECRET:\?/)
+  assert.match(productionCompose, /FLEET_DEV_PRICING_ENABLED:\s*"false"/)
+  for (const key of ['MYSQL_PASSWORD', 'MYSQL_ROOT_PASSWORD', 'DEMO_COOKIE_SECRET']) {
+    assert.match(envExample, new RegExp(`^${key}=$`, 'm'))
+  }
 })

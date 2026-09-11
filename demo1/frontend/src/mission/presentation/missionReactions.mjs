@@ -51,7 +51,7 @@ export const MISSION_REACTION_PRESENTATION = Object.freeze({
 })
 
 export const MISSION_SETTLEMENT_DIALOGUE = Object.freeze({
-  cheng: '任务拿下，背肌也得有镜头！',
+  cheng: '任务拿下，背阔肌也得有镜头！',
   anan: '收工！这才叫满分造型！'
 })
 

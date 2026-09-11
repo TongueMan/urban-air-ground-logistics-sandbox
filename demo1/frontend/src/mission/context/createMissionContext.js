@@ -1,6 +1,6 @@
 import { computed, ref, shallowRef } from 'vue'
 import { adaptCurrentDemoSnapshot } from '../adapters/logisticsMissionAdapter.mjs'
-import { actorById, preferredMediaSource, signalById } from '../presentation/missionSelectors.mjs'
+import { actorById, signalById } from '../presentation/missionSelectors.mjs'
 import { buildReplayMissionPresentation } from '../presentation/replayPresentation.mjs'
 
 export function createMissionContext(initialSnapshot = null) {
@@ -20,7 +20,6 @@ export function createMissionContext(initialSnapshot = null) {
   const focusedSignal = computed(() => signalById(mission.value, focusedSignalId.value))
   const activePhase = computed(() => mission.value.phases.find(phase => phase.id === mission.value.activePhaseId) || null)
   const activeMission = computed(() => mission.value)
-  const activeMediaSource = computed(() => preferredMediaSource(focusedActor.value))
 
   function ingestSnapshot(snapshot) {
     rawSnapshot.value = snapshot || null
@@ -87,7 +86,6 @@ export function createMissionContext(initialSnapshot = null) {
     focusedSignalId,
     focusedActor,
     focusedSignal,
-    activeMediaSource,
     timeCursor,
     timeMode,
     viewMode,

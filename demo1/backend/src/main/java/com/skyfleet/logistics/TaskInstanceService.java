@@ -265,7 +265,7 @@ public class TaskInstanceService {
                 "timelineEpoch", run.get("timelineEpoch"), "paused", false, "checkpoints", checkpoints, "rewindEligible", false));
         Map<String, Object> snapshot = new LinkedHashMap<>();
         snapshot.put("session", session); snapshot.put("mission", plan); snapshot.put("devices", latestDevices(plan, telemetry));
-        snapshot.put("signals", List.of()); snapshot.put("advisories", List.of()); snapshot.put("decisions", List.of());
+        snapshot.put("signals", List.of());
         return Map.of("taskId", run.get("taskId"), "run", run, "snapshot", snapshot, "telemetry", telemetry, "events", events,
                 "durationMs", run.get("simulationElapsedMs"));
     }
@@ -324,7 +324,7 @@ public class TaskInstanceService {
             Map<String, Object> device = new LinkedHashMap<>();
             device.put("deviceId", actorId); device.put("deviceType", actor.get("deviceType")); device.put("deviceName", actor.get("name"));
             device.put("actorKind", actor.get("kind")); device.put("actorRole", actor.get("role"));
-            device.put("capabilities", actor.getOrDefault("capabilities", List.of())); device.put("mediaSources", actor.getOrDefault("mediaSources", List.of()));
+            device.put("capabilities", actor.getOrDefault("capabilities", List.of()));
             if (point != null) {
                 device.put("longitude", point.get("longitude")); device.put("latitude", point.get("latitude")); device.put("altitude", point.get("altitude"));
                 device.put("sensorData", point.get("metrics"));

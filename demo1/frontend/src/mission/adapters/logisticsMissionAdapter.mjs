@@ -7,17 +7,8 @@ import {
 import { logisticsPresentationText } from '../presentation/logisticsVocabulary.mjs'
 
 const ACTOR_TYPE_PRESENTATION = Object.freeze({
-  ground_vehicle: { kind: 'VEHICLE', role: 'MOBILE_BASE', label: '城市配送车', capabilities: ['MOBILITY', 'UAV_CARRIER', 'CAMERA'] },
-  smart_drone: { kind: 'UAV', role: 'AIR_COURIER', label: '无人机', capabilities: ['FLIGHT', 'DELIVERY', 'CAMERA', 'TELEMETRY'] }
-})
-
-// Current Demo API does not expose media metadata. This explicit compatibility
-// registry is the only permitted bridge until MediaSource becomes server data.
-// It deliberately performs no suffix, substring, or array-position inference.
-const DEMO_MEDIA_BY_ACTOR = Object.freeze({
-  'HF-UAV-000003': [{ id: 'media-uav-01', kind: 'VIDEO', role: 'PRIMARY', label: '一号无人机配送视角', streamKey: 'delivery_uav_cam_01', fallbackFile: 'delivery_uav_cam_01.mp4' }],
-  'HF-UAV-000004': [{ id: 'media-uav-02', kind: 'VIDEO', role: 'PRIMARY', label: '二号无人机配送视角', streamKey: 'delivery_uav_cam_02', fallbackFile: 'delivery_uav_cam_02.mp4' }],
-  'HF-VEH-000001': [{ id: 'media-vehicle-01', kind: 'VIDEO', role: 'PRIMARY', label: '配送车道路运输视角', streamKey: 'delivery_vehicle_cam_01', fallbackFile: 'delivery_vehicle_cam_01.mp4' }]
+  ground_vehicle: { kind: 'VEHICLE', role: 'MOBILE_BASE', label: '城市配送车', capabilities: ['MOBILITY', 'UAV_CARRIER'] },
+  smart_drone: { kind: 'UAV', role: 'AIR_COURIER', label: '无人机', capabilities: ['FLIGHT', 'DELIVERY', 'TELEMETRY'] }
 })
 
 const SIGNAL_PRESENTATION = Object.freeze({
@@ -67,10 +58,6 @@ function normalizeActor(device = {}, activePhaseId, missionStatus) {
     telemetry,
     formationId: device.formationId ? String(device.formationId) : null,
     assignmentId: device.assignmentId ? String(device.assignmentId) : null,
-    mediaSources: (Array.isArray(device.mediaSources) ? device.mediaSources : DEMO_MEDIA_BY_ACTOR[String(device.deviceId)] || []).map(item => ({
-      ...item,
-      label: logisticsPresentationText(item.label)
-    })),
     commandCapabilities: Array.isArray(device.commandCapabilities) ? device.commandCapabilities.map(String) : [],
     commandTransport: device.commandTransport ? { ...device.commandTransport } : { status: 'UNAVAILABLE', reason: '当前 API 未声明设备命令传输能力' },
     source: 'CURRENT_DEMO_API'
@@ -144,7 +131,6 @@ function normalizeSignal(rawMission, event, index, actorsById, missionProgress) 
   const actor = actorId ? actorsById[actorId] : null
   const actions = []
   if (actor) actions.push({ id: 'focus-actor', label: '定位设备', kind: 'FOCUS_ACTOR', availability: 'AVAILABLE', requiresConfirmation: false })
-  if (actor?.mediaSources?.length) actions.push({ id: 'open-media', label: '查看视觉证据', kind: 'OPEN_MEDIA', availability: 'AVAILABLE', requiresConfirmation: false })
   return {
     id: `demo-signal-${index + 1}-${type.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
     type,
@@ -180,7 +166,6 @@ function normalizeServerSignal(rawMission, signal, actorsById) {
     || signal
   const actions = []
   if (actor) actions.push({ id: 'focus-actor', label: '定位设备', kind: 'FOCUS_ACTOR', availability: 'AVAILABLE', requiresConfirmation: false })
-  if (actor?.mediaSources?.length) actions.push({ id: 'open-media', label: '查看视觉证据', kind: 'OPEN_MEDIA', availability: 'AVAILABLE', requiresConfirmation: false })
   ;(Array.isArray(signal.allowedActions) ? signal.allowedActions : []).forEach(type => actions.push({
     id: `workflow-${String(type).toLowerCase()}`,
     label: WORKFLOW_ACTION_LABELS[type] || type,
@@ -289,5 +274,3 @@ export function adaptCurrentDemoSnapshot(snapshot = {}) {
     source: { session: rawSession, mission: rawMission, devices: rawDevices }
   }
 }
-
-export const currentDemoMediaRegistry = DEMO_MEDIA_BY_ACTOR

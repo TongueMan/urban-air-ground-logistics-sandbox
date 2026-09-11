@@ -43,15 +43,6 @@ export const executeSignalCommand = (sessionId, signalId, command) => request(
   `/api/demo/sessions/${encodeURIComponent(sessionId)}/signals/${encodeURIComponent(signalId)}/commands`,
   { method: 'POST', body: JSON.stringify(command) }
 )
-export const getIntelligenceStatus = () => request('/api/demo/sessions/intelligence/status')
-export const requestSignalAdvisory = (sessionId, signalId, advisoryId, objective = 'BALANCED') => request(
-  `/api/demo/sessions/${encodeURIComponent(sessionId)}/signals/${encodeURIComponent(signalId)}/advisories`,
-  { method: 'POST', body: JSON.stringify({ advisoryId, objective }) }
-)
-export const submitAdvisoryDecision = (sessionId, signalId, advisoryId, decision) => request(
-  `/api/demo/sessions/${encodeURIComponent(sessionId)}/signals/${encodeURIComponent(signalId)}/advisories/${encodeURIComponent(advisoryId)}/decisions`,
-  { method: 'POST', body: JSON.stringify(decision) }
-)
 export const sessionEventsUrl = id => `/api/demo/sessions/${encodeURIComponent(id)}/events`
 export const runEventsUrl = id => `/api/demo/runs/${encodeURIComponent(id)}/events`
 export const getFleet = () => request('/api/demo/fleet')

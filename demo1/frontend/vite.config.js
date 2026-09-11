@@ -1,18 +1,24 @@
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import { cpSync, createReadStream, existsSync, statSync } from 'node:fs'
-import { extname, isAbsolute, relative, resolve } from 'node:path'
+import { cpSync, createReadStream, existsSync, mkdirSync, statSync } from 'node:fs'
+import { dirname, extname, isAbsolute, relative, resolve } from 'node:path'
 
 const mapvAssetsSource = resolve('node_modules/@baidumap/mapv-three/dist/assets')
-const fallbackMediaSource = resolve('../media')
+const mapvAssetPaths = Object.freeze([
+  'textures/water/foam_noise.webp',
+  'models/effect/diamond.glb',
+  'workers/BaiduVectorParser.worker-c827f410.js'
+])
+const mapvAssetPathSet = new Set(mapvAssetPaths)
 
-function serveDirectory(source, request, response, next) {
+function serveDirectory(source, request, response, next, allowedPaths = null) {
   const relativePath = decodeURIComponent(String(request.url || '').split('?')[0]).replace(/^\/+/, '')
+  if (allowedPaths && !allowedPaths.has(relativePath)) return next()
   const assetPath = resolve(source, relativePath)
   const resolvedRelative = relative(source, assetPath)
   if (resolvedRelative.startsWith('..') || isAbsolute(resolvedRelative)) return next()
   if (!existsSync(assetPath) || !statSync(assetPath).isFile()) return next()
-  const mimeTypes = { '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.wasm': 'application/wasm', '.glb': 'model/gltf-binary', '.bin': 'application/octet-stream', '.mp4': 'video/mp4' }
+  const mimeTypes = { '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.wasm': 'application/wasm', '.glb': 'model/gltf-binary', '.bin': 'application/octet-stream' }
   response.setHeader('Content-Type', mimeTypes[extname(assetPath).toLowerCase()] || 'application/octet-stream')
   createReadStream(assetPath).pipe(response)
 }
@@ -21,11 +27,15 @@ function mapvThreeAssets() {
   return {
     name: 'skyfleet-mapv-assets',
     configureServer(server) {
-      server.middlewares.use('/mapvthree/assets', (request, response, next) => serveDirectory(mapvAssetsSource, request, response, next))
-      server.middlewares.use('/fallback-media', (request, response, next) => serveDirectory(fallbackMediaSource, request, response, next))
+      server.middlewares.use('/mapvthree/assets', (request, response, next) => serveDirectory(mapvAssetsSource, request, response, next, mapvAssetPathSet))
     },
     writeBundle(options) {
-      cpSync(mapvAssetsSource, resolve(options.dir || 'dist', 'mapvthree/assets'), { recursive: true, force: true })
+      const outputRoot = resolve(options.dir || 'dist', 'mapvthree/assets')
+      mapvAssetPaths.forEach(relativePath => {
+        const destination = resolve(outputRoot, relativePath)
+        mkdirSync(dirname(destination), { recursive: true })
+        cpSync(resolve(mapvAssetsSource, relativePath), destination, { force: true })
+      })
     }
   }
 }
@@ -44,8 +54,7 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       strictPort: true,
       proxy: {
-        '/api': { target: env.VITE_API_TARGET || 'http://localhost:8095', changeOrigin: true },
-        '/media': { target: env.VITE_MEDIA_TARGET || 'http://localhost:8889', changeOrigin: true, rewrite: path => path.replace(/^\/media/, '') }
+        '/api': { target: env.VITE_API_TARGET || 'http://localhost:8095', changeOrigin: true }
       }
     }
   }

@@ -40,11 +40,6 @@ public class DemoController {
         return sessions.current(visitor.visitorHash());
     }
 
-    @GetMapping("/intelligence/status")
-    public Map<String, Object> intelligenceStatus() {
-        return sessions.intelligenceStatus();
-    }
-
     @GetMapping("/{id}/mission")
     public Map<String, Object> mission(@PathVariable String id, HttpServletRequest request, HttpServletResponse response) {
         VisitorIdentity.Identity visitor = visitors.resolve(request, response);
@@ -90,23 +85,6 @@ public class DemoController {
         return sessions.signalCommand(id, visitor.visitorHash(), signalId, body.commandId(), body.type(), body.expectedSignalStatus());
     }
 
-    @PostMapping("/{id}/signals/{signalId}/advisories")
-    public Map<String, Object> signalAdvisory(@PathVariable String id, @PathVariable String signalId,
-                                              @RequestBody AdvisoryRequest body,
-                                              HttpServletRequest request, HttpServletResponse response) {
-        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
-        return sessions.signalAdvisory(id, visitor.visitorHash(), signalId, body.advisoryId(), body.objective());
-    }
-
-    @PostMapping("/{id}/signals/{signalId}/advisories/{advisoryId}/decisions")
-    public Map<String, Object> advisoryDecision(@PathVariable String id, @PathVariable String signalId,
-                                                 @PathVariable String advisoryId, @RequestBody DecisionRequest body,
-                                                 HttpServletRequest request, HttpServletResponse response) {
-        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
-        return sessions.signalDecision(id, visitor.visitorHash(), signalId, advisoryId, body.decisionId(), body.type(),
-                body.optionId(), body.expectedAdvisoryStatus());
-    }
-
     @DeleteMapping("/{id}")
     public Map<String, Object> stop(@PathVariable String id, HttpServletRequest request, HttpServletResponse response) {
         VisitorIdentity.Identity visitor = visitors.resolve(request, response);
@@ -121,6 +99,4 @@ public class DemoController {
 
     public record SpeedRequest(double timeScale) {}
     public record SignalCommandRequest(String commandId, String type, String expectedSignalStatus) {}
-    public record AdvisoryRequest(String advisoryId, String objective) {}
-    public record DecisionRequest(String decisionId, String type, String optionId, String expectedAdvisoryStatus) {}
 }

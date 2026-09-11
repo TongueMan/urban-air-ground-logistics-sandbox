@@ -27,8 +27,7 @@ class DemoSessionServiceCurrentTest {
 
         DemoSessionService service = new DemoSessionService(
                 catalog, mock(JdbcTemplate.class), new ObjectMapper(), mock(MqttBridge.class), traffic,
-                mock(TaskInstanceService.class), mock(MissionAdvisoryService.class),
-                mock(MissionDecisionService.class), mock(FleetService.class), 12, 100, 180, 75);
+                mock(TaskInstanceService.class), mock(FleetService.class), 12, 100, 180, 75);
         Map<String, DemoSession> sessions = (Map<String, DemoSession>) ReflectionTestUtils.getField(service, "sessions");
         sessions.put("DONE", new DemoSession("DONE", "visitor", "COMPLETED", "mission", "1.0.0"));
 

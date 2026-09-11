@@ -7,10 +7,6 @@ services:
     ports:
       - "${MQTT_PORT:-1883}:1883"
 
-  mediamtx:
-    ports:
-      - "${MEDIA_HTTP_PORT:-8889}:8889"
-
   backend:
     ports:
       - "${BACKEND_HTTP_PORT:-8095}:8095"
