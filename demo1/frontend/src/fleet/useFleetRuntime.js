@@ -172,8 +172,9 @@ export function useFleetRuntime() {
       replaceSnapshot(result.fleet)
       guidance.value = null
       selectedAssetId.value = asset.assetId
+      const autoRecalledCount = Array.isArray(result.autoRecalledAssetIds) ? result.autoRecalledAssetIds.length : 0
       notice.value = targetStatus === 'DEPLOYED'
-        ? `设备已按当前 ${Number(result.fleet?.assets?.find(item => item.assetId === asset.assetId)?.batteryPercent || 0).toFixed(0)}% 电量出站，并成为同类设备中当前地图使用的载具。`
+        ? `设备已按当前 ${Number(result.fleet?.assets?.find(item => item.assetId === asset.assetId)?.batteryPercent || 0).toFixed(0)}% 电量出站${autoRecalledCount ? `，并自动召回 ${autoRecalledCount} 台同类设备` : ''}。`
         : '设备已召回车库并自动充电，将在 60 秒内线性充满。'
       return result
     } catch (failure) {

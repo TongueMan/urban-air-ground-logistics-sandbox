@@ -157,13 +157,49 @@ public class FleetService {
                     battery, battery >= FULL_BATTERY_BASIS_POINTS ? null : battery,
                     battery >= FULL_BATTERY_BASIS_POINTS ? null : Timestamp.from(Instant.now()), safeAssetId, visitorHash);
         } else {
+            List<String> autoRecalledAssetIds = recallOtherDeployedAssets(visitorHash, asset);
             double battery = effectiveBattery(asset, Instant.now());
             jdbc.update("UPDATE fleet_asset SET asset_status='DEPLOYED',battery_basis_points=?,charging_from_basis_points=NULL,charging_started_at=NULL,active_run_id=NULL,state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(3) WHERE id=? AND visitor_hash=?",
                     battery, safeAssetId, visitorHash);
+            jdbc.update("INSERT INTO fleet_command(visitor_hash,command_id,command_type,request_fingerprint,target_asset_id,amount_minor) VALUES(?,?,?,?,?,0)",
+                    visitorHash, safeCommandId, "STATUS", fingerprint, safeAssetId);
+            Map<String, Object> response = result(visitorHash, safeCommandId, "STATUS_CHANGED", false, safeAssetId, 0);
+            response.put("autoRecalledAssetIds", autoRecalledAssetIds);
+            return response;
         }
         jdbc.update("INSERT INTO fleet_command(visitor_hash,command_id,command_type,request_fingerprint,target_asset_id,amount_minor) VALUES(?,?,?,?,?,0)",
                 visitorHash, safeCommandId, "STATUS", fingerprint, safeAssetId);
         return result(visitorHash, safeCommandId, "STATUS_CHANGED", false, safeAssetId, 0);
+    }
+
+    private List<String> recallOtherDeployedAssets(String visitorHash, AssetState target) {
+        String category;
+        try { category = catalog.require(target.typeId()).category(); }
+        catch (IllegalArgumentException error) { throw badRequest(error.getMessage()); }
+
+        List<AssetState> sameCategory = jdbc.query(
+                        "SELECT id,type_id,asset_status,battery_basis_points,charging_from_basis_points,charging_started_at,active_run_id,state_version,updated_at FROM fleet_asset WHERE visitor_hash=? AND asset_status='DEPLOYED' AND sold_at IS NULL FOR UPDATE",
+                        (rs, row) -> assetState(rs), visitorHash).stream()
+                .filter(candidate -> !candidate.id().equals(target.id()))
+                .filter(candidate -> {
+                    try { return category.equals(catalog.require(candidate.typeId()).category()); }
+                    catch (IllegalArgumentException ignored) { return false; }
+                })
+                .toList();
+        if (sameCategory.stream().anyMatch(candidate -> candidate.activeRunId() != null)) {
+            throw new DemoException(HttpStatus.CONFLICT, "同类设备正在执行任务，结束任务后才能切换出站设备");
+        }
+
+        Instant now = Instant.now();
+        List<String> recalledAssetIds = new ArrayList<>();
+        for (AssetState candidate : sameCategory) {
+            double battery = clampBattery(candidate.batteryBasisPoints());
+            jdbc.update("UPDATE fleet_asset SET asset_status='GARAGED',battery_basis_points=?,charging_from_basis_points=?,charging_started_at=?,active_run_id=NULL,state_version=state_version+1,updated_at=CURRENT_TIMESTAMP(3) WHERE id=? AND visitor_hash=?",
+                    battery, battery >= FULL_BATTERY_BASIS_POINTS ? null : battery,
+                    battery >= FULL_BATTERY_BASIS_POINTS ? null : Timestamp.from(now), candidate.id(), visitorHash);
+            recalledAssetIds.add(candidate.id());
+        }
+        return recalledAssetIds;
     }
 
     @Transactional

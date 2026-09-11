@@ -141,16 +141,35 @@ class FleetServiceTest {
         FleetService.GroundVehicle frozen = fixture.service.freezeGroundVehicle(VISITOR_A);
         Map<String, Object> purchase = fixture.service.purchase(VISITOR_A, "buy-switch", "ford-f350-utility", "DEV");
         String f350Id = String.valueOf(purchase.get("assetId"));
-        fixture.service.changeStatus(VISITOR_A, f350Id, "deploy-switch", "DEPLOYED");
-        fixture.jdbc.update("UPDATE fleet_asset SET updated_at=TIMESTAMP '2026-09-09 12:00:01' WHERE id=?", tricycleId);
-        fixture.jdbc.update("UPDATE fleet_asset SET updated_at=TIMESTAMP '2026-09-09 12:00:02' WHERE id=?", f350Id);
+        fixture.jdbc.update("UPDATE fleet_asset SET battery_basis_points=4000 WHERE id=?", tricycleId);
+        Map<String, Object> switched = fixture.service.changeStatus(VISITOR_A, f350Id, "deploy-switch", "DEPLOYED");
+        assertThat(switched.get("autoRecalledAssetIds")).isEqualTo(List.of(tricycleId));
+        assertThat(asset(fleet(switched), tricycleId)).containsEntry("status", "GARAGED").containsEntry("charging", true);
+        assertThat(asset(fleet(switched), f350Id)).containsEntry("status", "DEPLOYED");
+        assertThat(assets(fleet(switched))).filteredOn(item -> "DEPLOYED".equals(item.get("status"))).hasSize(2);
         assertThatThrownBy(() -> fixture.service.bindGroundVehicle(VISITOR_A, "RUN-STALE", tricycleId, frozen.stateVersion()))
                 .isInstanceOf(DemoException.class).hasMessageContaining("重新生成");
 
         fixture.service.changeStatus(VISITOR_A, f350Id, "recall-f350", "GARAGED");
-        fixture.service.changeStatus(VISITOR_A, tricycleId, "recall-tricycle", "GARAGED");
         assertThatThrownBy(() -> fixture.service.freezeGroundVehicle(VISITOR_A))
                 .isInstanceOf(DemoException.class).hasMessageContaining("没有地面运输车出站");
+    }
+
+    @Test
+    void deploymentCannotAutoRecallSameCategoryAssetBoundToRunningMission() {
+        Fixture fixture = fixture(true);
+        Map<String, Object> initial = fixture.service.snapshot(VISITOR_A);
+        String tricycleId = assets(initial).stream().filter(asset -> "tricycle".equals(asset.get("typeId")))
+                .map(asset -> String.valueOf(asset.get("assetId"))).findFirst().orElseThrow();
+        FleetService.GroundVehicle frozen = fixture.service.freezeGroundVehicle(VISITOR_A);
+        fixture.service.bindGroundVehicle(VISITOR_A, "RUN-SWITCH-GUARD", tricycleId, frozen.stateVersion());
+        String f350Id = String.valueOf(fixture.service.purchase(VISITOR_A, "buy-switch-guard", "ford-f350-utility", "DEV").get("assetId"));
+
+        assertThatThrownBy(() -> fixture.service.changeStatus(VISITOR_A, f350Id, "deploy-switch-guard", "DEPLOYED"))
+                .isInstanceOf(DemoException.class).hasMessageContaining("正在执行任务");
+        Map<String, Object> unchanged = fixture.service.snapshot(VISITOR_A);
+        assertThat(asset(unchanged, tricycleId)).containsEntry("status", "DEPLOYED");
+        assertThat(asset(unchanged, f350Id)).containsEntry("status", "GARAGED");
     }
 
     @Test
@@ -410,16 +429,15 @@ class FleetServiceTest {
 
         Map<String, Object> purchase = fixture.service.purchase(VISITOR_A, "buy-independent-air", "vtol-air-taxi", "DEV");
         String vtolId = String.valueOf(purchase.get("assetId"));
-        fixture.service.changeStatus(VISITOR_A, vtolId, "deploy-independent-air", "DEPLOYED");
-        fixture.jdbc.update("UPDATE fleet_asset SET updated_at=TIMESTAMP '2026-09-08 12:00:01' WHERE id=?", starterDroneId);
-        fixture.jdbc.update("UPDATE fleet_asset SET updated_at=TIMESTAMP '2026-09-08 12:00:02' WHERE id=?", vtolId);
+        Map<String, Object> switched = fixture.service.changeStatus(VISITOR_A, vtolId, "deploy-independent-air", "DEPLOYED");
+        assertThat(switched.get("autoRecalledAssetIds")).isEqualTo(List.of(starterDroneId));
+        assertThat(asset(fleet(switched), starterDroneId)).containsEntry("status", "GARAGED");
 
         assertThat(fixture.service.latestDeployedTypeId(VISITOR_A, "AIR")).isEqualTo("vtol-air-taxi");
         assertThat(fixture.service.usesIndependentAirRoute(VISITOR_A)).isTrue();
         assertThatThrownBy(() -> fixture.service.bindAirVehicle(VISITOR_A, "RUN-STALE-AIR", starterDroneId, frozen.stateVersion()))
                 .isInstanceOf(DemoException.class).hasMessageContaining("重新生成");
         fixture.service.changeStatus(VISITOR_A, vtolId, "recall-vtol", "GARAGED");
-        fixture.service.changeStatus(VISITOR_A, starterDroneId, "recall-starter-air", "GARAGED");
         assertThatThrownBy(() -> fixture.service.freezeAirVehicle(VISITOR_A))
                 .isInstanceOf(DemoException.class).hasMessageContaining("没有空中运输设备出站");
     }

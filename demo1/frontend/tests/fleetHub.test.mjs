@@ -105,6 +105,8 @@ test('fleet runtime replaces its snapshot from server responses', () => {
   assert.match(runtime, /mergeMissionEconomy/)
   assert.match(runtime, /incomingUpdatedAt < currentUpdatedAt/)
   assert.match(runtime, /replaceSnapshot\(result\.fleet\)/)
+  assert.match(runtime, /autoRecalledAssetIds/)
+  assert.match(runtime, /自动召回/)
   assert.match(runtime, /sellFleetAsset/)
   assert.match(runtime, /commandId\('SELL'\)/)
   assert.match(api, /sellFleetAsset/)
@@ -135,6 +137,7 @@ test('fleet hub confirms full-price sales and prevents deployed asset sales', ()
   assert.match(hub, /下一步/)
   assert.match(hub, /runtime\.guidance\.value/)
   assert.match(hub, /runtime\.dismissGuidance/)
+  assert.match(hub, /地面与空中各限一台出站/)
 })
 
 test('battery colors use the five gameplay bands and charging projects linearly', () => {

@@ -149,7 +149,7 @@
         </div>
 
         <footer class="hub-footer" data-tutorial-id="fleet-deployment">
-          <div class="fleet-state-summary"><span><i class="garaged"></i>车库中 {{ runtime.counts.value.garaged }}</span><span><i class="deployed"></i>已出站 {{ runtime.counts.value.deployed }}</span><small>同类设备中最后出站的一台用于当前地图任务</small></div>
+          <div class="fleet-state-summary"><span><i class="garaged"></i>车库中 {{ runtime.counts.value.garaged }}</span><span><i class="deployed"></i>已出站 {{ runtime.counts.value.deployed }}</span><small>地面与空中各限一台出站；切换时自动召回同类设备</small></div>
           <p v-if="runtime.error.value" class="operation-message error" role="alert">{{ runtime.error.value }}</p>
           <p v-else-if="runtime.notice.value" class="operation-message" role="status">{{ runtime.notice.value }}</p>
           <label v-if="runtime.snapshot.value.devModeAllowed" class="dev-toggle">
