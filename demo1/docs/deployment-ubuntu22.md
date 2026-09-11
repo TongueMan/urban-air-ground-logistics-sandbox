@@ -66,6 +66,16 @@ ssh -L 8088:127.0.0.1:8088 ubuntu@服务器公网IP
 
 然后在本机访问 `http://127.0.0.1:8088`。
 
+### 已有网站且不能改动宿主机 Nginx 时
+
+如果服务器上的 80/443 端口和宿主机 Nginx 已属于其他项目，可以使用随项目提供的独立公网端口覆盖配置：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.public-port.yml --env-file .env.local up -d --build
+```
+
+在云厂商安全组中仅额外放行 TCP 8088，即可通过 `http://服务器公网IP:8088` 访问。前端容器已内置按 IP 的请求与连接限流；1883、3306 和 8095 仍不得开放。该方式不会占用或修改宿主机 Nginx，适合与现有网站隔离共存，但使用公网 IP 时只有 HTTP。取得独立域名后，仍建议通过独立域名和 HTTPS 对外提供服务。
+
 ## 4. 首次配置域名和证书
 
 安装宿主机 Nginx 与 Certbot：
