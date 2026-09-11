@@ -43,7 +43,7 @@ import { runtimeConfig, staticAssetCandidates } from '../config/runtime'
 import { createBaiduCyberProvider } from '../config/baiduCyberMap'
 import { ACTIVE_MODEL_ROLES, getModelAsset, mapPresentationForAsset } from '../config/modelAssets.mjs'
 import { centerSceneForTransform } from '../utils/modelSceneTransforms.mjs'
-import { missionOverviewCamera, missionViewportOptions, plannerAwareViewportPoints, planningPreviewViewportOptions } from '../utils/missionViewport.mjs'
+import { missionOverviewCamera, missionViewportOptions } from '../utils/missionViewport.mjs'
 import { resolveAirspaceActivation, visibleAirspaceConflicts } from '../utils/airspaceVisibility.mjs'
 import {
   adjustFollowZoomScale,
@@ -1515,18 +1515,11 @@ function updateRoutes() {
   airspaceVolumes().forEach(volume => viewportPoints.push(...coordinates(volume.footprint, Number(volume.floorMeters || 0))))
   currentMissionViewportPoints = viewportPoints.map(point => point.slice())
   if (!fitted && viewportPoints.length > 1) {
-    const planner = props.planningPreview ? document.querySelector('[data-tutorial-id="mission-planner"]') : null
-    const focusPoints = props.planningPreview
-      ? plannerAwareViewportPoints(viewportPoints, {
-          panelWidth: Number(planner?.getBoundingClientRect().right || 0) + 24,
-          viewportWidth: window.innerWidth
-        })
-      : viewportPoints
-    engine.map.setHeading(OVERVIEW.heading)
-    engine.map.setPitch(OVERVIEW.pitch)
-    engine.map.setViewport(focusPoints, props.planningPreview
-      ? planningPreviewViewportOptions()
-      : missionViewportOptions())
+    if (!props.planningPreview || !flyToMissionOverview(viewportPoints)) {
+      engine.map.setHeading(OVERVIEW.heading)
+      engine.map.setPitch(OVERVIEW.pitch)
+      engine.map.setViewport(viewportPoints, missionViewportOptions())
+    }
     fitted = true
   }
   engine.requestRender()
@@ -1575,22 +1568,26 @@ async function initMap() {
   updateRoutes(); mapLoading.value = false
 }
 function setFollowMode(mode) { followMode.value = mode === 'side' ? 'side' : 'rear'; engine?.requestRender() }
+function flyToMissionOverview(points = currentMissionViewportPoints, duration = 850) {
+  if (!engine) return false
+  const camera = missionOverviewCamera(points, {
+    heading: OVERVIEW.heading,
+    pitch: OVERVIEW.pitch
+  })
+  if (!camera) return false
+  engine.map.flyTo(camera.center, {
+    heading: camera.heading,
+    pitch: camera.pitch,
+    range: camera.range,
+    duration
+  })
+  return true
+}
 function leaveFollow() {
   followingId.value = ''
   followZoomScale = 1
   emit('select', '')
-  const camera = missionOverviewCamera(currentMissionViewportPoints, {
-    heading: OVERVIEW.heading,
-    pitch: OVERVIEW.pitch
-  })
-  if (camera) {
-    engine?.map.flyTo(camera.center, {
-      heading: camera.heading,
-      pitch: camera.pitch,
-      range: camera.range,
-      duration: 850
-    })
-  } else {
+  if (!flyToMissionOverview()) {
     engine?.map.flyTo(OVERVIEW.center, {
       heading: OVERVIEW.heading,
       pitch: OVERVIEW.pitch,

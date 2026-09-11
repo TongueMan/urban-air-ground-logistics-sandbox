@@ -9,7 +9,7 @@ import { canAutoResumeTutorial, canReplayTutorial, createManualAttentionRecord, 
 import { FLEET_CENTER_STEPS, FLEET_TUTORIAL_CHAPTER, FLEET_TUTORIAL_STORAGE_KEY, PROLOGUE_STEPS, RUN_DEPENDENT_STEPS, TUTORIAL_ATTENTION_STORAGE_KEY, TUTORIAL_CHAPTER, TUTORIAL_STORAGE_KEY } from '../src/tutorial/tutorialScript.mjs'
 import { tutorialFleetIssue } from '../src/tutorial/tutorialReadiness.mjs'
 import { buildDialogueSegments } from '../src/tutorial/tutorialText.mjs'
-import { fittedMissionRange, missionBoundsMeters, missionOverviewCamera, missionViewportOptions, plannerAwareViewportPoints, planningPreviewViewportOptions } from '../src/utils/missionViewport.mjs'
+import { fittedMissionRange, missionBoundsMeters, missionOverviewCamera, missionViewportOptions, plannerAwareViewportPoints } from '../src/utils/missionViewport.mjs'
 
 const frontendRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -179,7 +179,6 @@ test('mission viewport uses the tighter bounded range and planner-safe west padd
   assert.ok(padded.at(-1)[0] < Math.min(...points.map(point => point[0])))
   assert.deepEqual(missionViewportOptions(), { range: 120, zoom: 0 })
   assert.deepEqual(missionViewportOptions({ range: 999, zoom: 9 }), { range: 600, zoom: 2 })
-  assert.deepEqual(planningPreviewViewportOptions(), { range: 120, zoom: 1.45 })
   assert.deepEqual(missionOverviewCamera(points), {
     center: bounds.center,
     heading: 12,
