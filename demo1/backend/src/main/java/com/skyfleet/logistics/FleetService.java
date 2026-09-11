@@ -466,10 +466,10 @@ public class FleetService {
         String prefix = safeVisitorHash.substring(0, Math.min(16, safeVisitorHash.length())).toUpperCase(Locale.ROOT);
         jdbc.update("INSERT IGNORE INTO fleet_account_ledger(id,visitor_hash,entry_key,entry_type,amount_minor,balance_after_minor) VALUES(?,?,?,?,?,?)",
                 "LED-INIT-" + prefix, safeVisitorHash, "INITIAL_CAPITAL", "INITIAL_CAPITAL", INITIAL_BALANCE_MINOR, INITIAL_BALANCE_MINOR);
-        jdbc.update("INSERT IGNORE INTO fleet_asset(id,visitor_hash,type_id,asset_status,acquisition_source,acquisition_price_minor,initial_key) VALUES(?,?,?,?,?,0,?)",
-                "FLT-INIT-G-" + prefix, safeVisitorHash, "tricycle", "DEPLOYED", "INITIAL", "GROUND_STARTER");
-        jdbc.update("INSERT IGNORE INTO fleet_asset(id,visitor_hash,type_id,asset_status,acquisition_source,acquisition_price_minor,initial_key) VALUES(?,?,?,?,?,0,?)",
-                "FLT-INIT-A-" + prefix, safeVisitorHash, "smart-city-drone", "DEPLOYED", "INITIAL", "AIR_STARTER");
+        jdbc.update("INSERT IGNORE INTO fleet_asset(id,visitor_hash,type_id,asset_status,battery_basis_points,charging_from_basis_points,charging_started_at,state_version,acquisition_source,acquisition_price_minor,initial_key) VALUES(?,?,?,?,?,NULL,NULL,0,?,0,?)",
+                "FLT-INIT-G-" + prefix, safeVisitorHash, "tricycle", "DEPLOYED", FULL_BATTERY_BASIS_POINTS, "INITIAL", "GROUND_STARTER");
+        jdbc.update("INSERT IGNORE INTO fleet_asset(id,visitor_hash,type_id,asset_status,battery_basis_points,charging_from_basis_points,charging_started_at,state_version,acquisition_source,acquisition_price_minor,initial_key) VALUES(?,?,?,?,?,NULL,NULL,0,?,0,?)",
+                "FLT-INIT-A-" + prefix, safeVisitorHash, "smart-city-drone", "DEPLOYED", FULL_BATTERY_BASIS_POINTS, "INITIAL", "AIR_STARTER");
     }
 
     private void lockCompany(String visitorHash) {

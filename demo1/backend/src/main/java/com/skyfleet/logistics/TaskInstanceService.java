@@ -92,6 +92,7 @@ public class TaskInstanceService {
                     validation.put("violations", List.of());
                     String taskId = id("TASK");
                     Map<String, Object> plan = new LinkedHashMap<>(generated.plan());
+                    if (Boolean.TRUE.equals(parameters.get("tutorialBatteryProtected"))) protectTutorialBattery(plan);
                     plan.put("seed", seed);
                     plan.put("generatorVersion", GENERATOR_VERSION);
                     plan.put("rulesetVersion", RULESET_VERSION);
@@ -1594,11 +1595,32 @@ public class TaskInstanceService {
             throw new DemoException(HttpStatus.BAD_REQUEST, "禁飞区数量必须是 2、3 或 4");
         boolean trafficSignalsEnabled = ScenarioTemplateCatalog.CAMPUS_TEMPLATE_ID.equals(descriptor.id())
                 ? false : booleanParameter(raw.get("trafficSignalsEnabled"), true, "交通信号灯");
+        boolean tutorialBatteryProtected = booleanParameter(raw.get("tutorialBatteryProtected"), false, "教程电量保护");
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("deliveryDensity", intensity); result.put("flightAltitudeMeters", altitude);
         result.put("maxDurationMinutes", duration); result.put("returnReservePercent", reserve);
         result.put("airspaceThemeCount", (int) airspaceThemeCount);
+        result.put("tutorialBatteryProtected", tutorialBatteryProtected);
         result.put("trafficSignalsEnabled", trafficSignalsEnabled); return result;
+    }
+
+    private static void protectTutorialBattery(Map<String, Object> plan) {
+        plan.put("tutorialBatteryProtected", true);
+        for (String key : List.of("groundVehicle", "airVehicle")) {
+            Map<String, Object> vehicle = new LinkedHashMap<>(castMap(plan.get(key)));
+            vehicle.put("batteryPercent", 100.0);
+            plan.put(key, vehicle);
+        }
+        for (Map<String, Object> actor : castListOfMaps(plan.get("actors"))) {
+            if ("VEHICLE".equals(actor.get("kind")) || "UAV".equals(actor.get("kind"))) {
+                actor.put("initialBattery", 100.0);
+            }
+        }
+        Map<String, Object> quote = new LinkedHashMap<>(castMap(plan.get("economyQuote")));
+        quote.put("batterySufficient", true);
+        quote.put("groundBatterySufficient", true);
+        quote.put("airBatterySufficient", true);
+        plan.put("economyQuote", quote);
     }
 
     private static boolean booleanParameter(Object raw, boolean fallback, String label) {

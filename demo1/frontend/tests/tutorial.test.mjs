@@ -121,7 +121,7 @@ test('refresh only auto-resumes a tutorial that belongs to the active non-termin
   assert.equal(canAutoResumeTutorial(running, { activeRunId: 'RUN-2' }), false)
 })
 
-test('tutorial fleet readiness catches missing, depleted and route-insufficient equipment', () => {
+test('tutorial fleet readiness only requires deployed equipment because battery is protected', () => {
   const catalog = [
     { typeId: 'ground', category: 'GROUND' },
     { typeId: 'air', category: 'AIR' }
@@ -130,9 +130,14 @@ test('tutorial fleet readiness catches missing, depleted and route-insufficient 
   const air = { assetId: 'A-1', typeId: 'air', status: 'DEPLOYED', batteryPercent: 80, updatedAt: '2026-09-10T00:00:00Z' }
   assert.equal(tutorialFleetIssue({ catalog, assets: [] }).code, 'GROUND_NOT_DEPLOYED')
   assert.equal(tutorialFleetIssue({ catalog, assets: [ground] }).code, 'AIR_NOT_DEPLOYED')
-  assert.equal(tutorialFleetIssue({ catalog, assets: [ground, { ...air, batteryPercent: 0 }] }).code, 'AIR_BATTERY_DEPLETED')
-  assert.equal(tutorialFleetIssue({ catalog, assets: [ground, air] }, { plan: { economyQuote: { airBatterySufficient: false } } }).code, 'AIR_BATTERY_INSUFFICIENT')
+  assert.equal(tutorialFleetIssue({ catalog, assets: [{ ...ground, batteryPercent: 0 }, { ...air, batteryPercent: 0 }] }), null)
+  assert.equal(tutorialFleetIssue({ catalog, assets: [ground, air] }, { plan: { economyQuote: { airBatterySufficient: false } } }), null)
   assert.equal(tutorialFleetIssue({ catalog, assets: [ground, air] }), null)
+})
+
+test('tutorial generation marks its task for server-side battery protection', () => {
+  const planner = readFileSync(join(frontendRoot, 'src', 'components', 'mission', 'TaskPlanner.vue'), 'utf8')
+  assert.match(planner, /tutorialBatteryProtected: Boolean\(runtime\.tutorialGenerationPreset\.value\)/)
 })
 
 test('chapter 01 has independent versioned progress and rewinds when the fleet hub is closed', () => {
@@ -198,7 +203,18 @@ test('prologue teaches real device following and the three desktop map gestures 
   assert.ok(PROLOGUE_STEPS.findIndex(step => step.id === 'D11-MOUSE') < PROLOGUE_STEPS.findIndex(step => step.id === 'D12'))
   const overlay = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialOverlay.vue'), 'utf8')
   assert.match(overlay, /is-device-follow-step/)
-  assert.match(overlay, /top:112px/)
+  assert.match(overlay, /is-live-aware/)
+  assert.match(overlay, /left:clamp\(440px,32vw,620px\)/)
+  assert.doesNotMatch(overlay, /is-device-follow-step :deep\(\.tutorial-dialogue\)\{[^}]*top:112px/)
+})
+
+test('prologue explains the operating role, platform purpose and ready starter fleet before the first action', () => {
+  const opening = PROLOGUE_STEPS.slice(0, 6).map(step => step.text).join('\n')
+  for (const phrase of ['城市空地协同物流运营中心', '新任运营调度负责人', '订单、车辆、无人机与数字空域', '城市地图就是你的指挥台', '满电', '均已出站', '时效、电量、资金与空域安全']) {
+    assert.match(opening, new RegExp(phrase))
+  }
+  assert.equal(PROLOGUE_STEPS.slice(0, 6).every(step => step.mode === 'dialogue'), true)
+  assert.equal(PROLOGUE_STEPS[6].id, 'A01')
 })
 
 test('connector geometry produces a bounded cubic path for horizontal and vertical targets', () => {
@@ -258,7 +274,7 @@ test('real mission elements expose every v3 tutorial contract', () => {
   const missionTimeline = readFileSync(join(frontendRoot, 'src', 'components', 'mission', 'MissionTimeline.vue'), 'utf8')
   const instrumentCluster = readFileSync(join(frontendRoot, 'src', 'components', 'instruments', 'InstrumentCluster.vue'), 'utf8')
   const source = `${missionState}\n${taskPlanner}\n${missionMap}\n${fleetDock}\n${airspacePanel}\n${missionTimeline}\n${instrumentCluster}`
-  for (const id of ['create-mission', 'mission-planner', 'mission-area', 'mission-zone-count', 'mission-zone-count-four', 'generate-mission', 'mission-preview', 'start-mission', 'mission-control', 'mission-device-list', 'mission-device', 'mission-map-interaction', 'return-mission-overview', 'red-airspace-conflict', 'airspace-keep-course', 'mission-timeline', 'mission-rewind-checkpoint', 'mission-rewind-restore', 'airspace-detour', 'mission-battery']) {
+  for (const id of ['create-mission', 'mission-planner', 'mission-area', 'mission-zone-count', 'mission-zone-count-four', 'generate-mission', 'mission-preview', 'start-mission', 'mission-control', 'mission-device-list', 'mission-device', 'mission-map-interaction', 'return-mission-overview', 'red-airspace-conflict', 'airspace-inspector', 'airspace-keep-course', 'mission-timeline', 'mission-rewind-checkpoint', 'mission-rewind-restore', 'airspace-detour', 'mission-battery']) {
     assert.match(source, new RegExp(id))
   }
 })
@@ -290,14 +306,22 @@ test('runtime integration owns only its pause and waits for authoritative detour
   assert.match(engine, /PROLOGUE_TUTORIAL_SEED/)
   assert.match(engine, /mapFollowingDeviceId/)
   assert.match(engine, /runtime\.context\.focusActor\(deviceId\)/)
+  assert.match(engine, /function focusRedCourseDrone\(\)/)
+  assert.match(engine, /actor => actor\.kind === 'UAV'/)
+  assert.match(engine, /droneId && runtime\.context\?\.focusActor\(droneId\)/)
+  assert.match(engine, /function restoreRedCourseOverview\(stepId = currentStep\.value\?\.id\)/)
+  assert.match(engine, /stepId !== 'D13-REWIND'/)
+  assert.match(engine, /runtime\.context\.clearFocus\(\)/)
   assert.match(runtime, /mapFollowingDeviceId: readonly\(mapFollowingDeviceId\)/)
   assert.match(runtime, /tutorialRedConflictLocked: readonly\(tutorialRedConflictLocked\)/)
   assert.match(runtime, /tutorialRewindLocked: readonly\(tutorialRewindLocked\)/)
   assert.match(runtime, /tutorialMissionReactionsSuppressed: readonly\(tutorialMissionReactionsSuppressed\)/)
   assert.match(engine, /configureProloguePresentationGuards/)
-  assert.match(engine, /runtime\.clearTutorialRedConflictLocked\(\)[\s\S]{0,80}completeAction\(\)/)
+  assert.match(engine, /runtime\.setTutorialRedConflictLocked\(true\)[\s\S]{0,120}runtime\.closeAirspace\(\)[\s\S]{0,80}completeAction\(\)/)
   const observation = engine.match(/async function beginRedCourseObservation\(\) \{[\s\S]*?\n  \}/)?.[0] || ''
   assert.match(observation, /currentStep\.value\.id !== 'WAIT-RED-VIOLATION'/)
+  assert.match(observation, /focusRedCourseDrone\(\)/)
+  assert.ok(observation.indexOf('focusRedCourseDrone()') < observation.indexOf('await releaseTutorialPause()'))
   assert.match(observation, /await releaseTutorialPause\(\)/)
   const closeChapter = engine.match(/function closeActiveChapter\([^]*?\n  \}/)?.[0] || ''
   assert.match(closeChapter, /clearTutorialRedConflictLocked/)
@@ -326,52 +350,136 @@ test('prologue locks timeline history until A07 and self-heals premature rewind 
   assert.match(engine, /attributeFilter: \['class', 'style', 'disabled', 'data-tutorial-id'\]/)
 })
 
-test('timeline guidance stays above the timeline and only renders its speaking cast', () => {
+test('dense tutorial scenes render only the speaker and action guidance uses an inset avatar', () => {
   const overlay = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialOverlay.vue'), 'utf8')
   const character = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialCharacter.vue'), 'utf8')
+  const dialogue = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialDialogue.vue'), 'utf8')
   assert.match(overlay, /v-else-if="showTutorialCast"/)
   assert.match(overlay, /TUTORIAL_PHASES\.DIALOGUE,[\s\S]{0,80}TUTORIAL_PHASES\.ACTION/)
+  assert.match(overlay, /v-if="showAnan && !engine\.isActionMode\.value"/)
+  assert.match(overlay, /v-if="showCheng && !engine\.isActionMode\.value"/)
+  assert.match(overlay, /const duoCast = computed\([\s\S]{0,300}!engine\.currentStep\.value\.targetId/)
   const timelineRule = overlay.match(/\.tutorial-presentation\.is-timeline-step :deep\(\.tutorial-dialogue\)\{[^}]+\}/)?.[0] || ''
   assert.match(timelineRule, /bottom:84px/)
   assert.match(timelineRule, /left:50%/)
   assert.doesNotMatch(timelineRule, /top:112px|right:24px/)
-  const actionSpeakerRule = character.match(/\.tutorial-character\.is-action\.is-speaking \{[^}]+\}/)?.[0] || ''
-  assert.match(actionSpeakerRule, /brightness\(1\) saturate\(1\)/)
-  assert.match(actionSpeakerRule, /opacity: 1/)
-  assert.ok(character.indexOf('.tutorial-character.is-action.is-speaking') > character.indexOf('.tutorial-character.is-fleet.is-action'))
+  assert.match(dialogue, /v-if="actionMode" class="dialogue-avatar"/)
+  assert.match(dialogue, /\.dialogue-avatar\{[^}]*width:54px[^}]*height:54px/)
+  assert.match(overlay, /:expression="engine\.expression\.value"/)
+  assert.match(character, /bottom: 18px/)
+  assert.match(character, /calc\(50% - 570px\)/)
 })
 
-test('v3 script teaches a real red-zone mistake, checkpoint rewind and corrected detour', () => {
+test('airspace inspector keeps its business positioning and reserves a tutorial safe area', () => {
+  const dialogue = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialDialogue.vue'), 'utf8')
+  const overlay = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialOverlay.vue'), 'utf8')
+  const inspectorRule = dialogue.match(/\.tutorial-dialogue\.is-inspector\{[^}]+\}/)?.[0] || ''
+  assert.match(inspectorRule, /left:50%/)
+  assert.match(inspectorRule, /width:min\(960px,calc\(100% - 24px\)\)/)
+  assert.match(inspectorRule, /transform:translateX\(-50%\)/)
+  assert.match(overlay, /is-live-aware\.is-inspector-aware \.tutorial-stage\{right:clamp\(360px,21vw,400px\)\}/)
+  assert.doesNotMatch(overlay, /tutorial-target-active[^}]*position:relative/)
+})
+
+test('airspace conflict card advertises its click action and links to the inspector after rewind', () => {
+  const missionMap = readFileSync(join(frontendRoot, 'src', 'components', 'LogisticsMissionMap.vue'), 'utf8')
+  const overlay = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialOverlay.vue'), 'utf8')
+  assert.match(missionMap, /点击查看处置/)
+  assert.match(missionMap, /is-click-inviting/)
+  assert.match(missionMap, /conflict-card-invite 1\.2s ease-in-out 3/)
+  assert.match(missionMap, /viewedConflictKeys/)
+  assert.match(overlay, /engine\.currentStep\.value\.id === 'D14-INSPECT'/)
+  assert.match(overlay, /tutorial-relation-arrow/)
+  assert.match(overlay, /marker-end="url\(#tutorial-relation-arrow\)"/)
+  assert.match(overlay, /calculateConnectorPath\(relationTargetRect\.value, relationSourceRect\.value, viewport\)/)
+  assert.match(overlay, /relation-source-frame/)
+})
+
+test('tutorial dialogue stays centered inside context-aware stage safe areas', () => {
+  const dialogue = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialDialogue.vue'), 'utf8')
+  const overlay = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialOverlay.vue'), 'utf8')
+  const baseRule = dialogue.match(/\.tutorial-dialogue\{[^}]+\}/)?.[0] || ''
+  assert.match(baseRule, /left:50%/)
+  assert.match(baseRule, /transform:translateX\(-50%\)/)
+  const groupedRule = dialogue.match(/\.tutorial-dialogue\.is-planner,\.tutorial-dialogue\.is-inspector\{[^}]+\}/)?.[0] || ''
+  const fleetRule = dialogue.match(/\.tutorial-dialogue\.is-fleet\{[^}]+\}/)?.[0] || ''
+  const timelineRule = overlay.match(/\.tutorial-presentation\.is-timeline-step :deep\(\.tutorial-dialogue\)\{[^}]+\}/)?.[0] || ''
+  for (const rule of [groupedRule, fleetRule, timelineRule]) {
+    assert.match(rule, /right:auto/)
+    assert.match(rule, /left:50%/)
+    assert.match(rule, /transform:translateX\(-50%\)/)
+  }
+  assert.match(overlay, /is-planner-aware \.tutorial-stage\{left:clamp\(448px,30vw,530px\)\}/)
+  assert.match(overlay, /is-live-aware:not\(\.is-planner-aware\) \.tutorial-stage\{left:clamp\(440px,32vw,620px\);right:clamp\(292px,19vw,380px\)\}/)
+  assert.match(overlay, /max-width:1600px\) and \(max-height:900px\)[\s\S]{0,260}\.tutorial-dialogue\)\{bottom:88px\}/)
+  assert.doesNotMatch(dialogue, /calc\(100vw - (?:760|400)px\)/)
+})
+
+test('v3 script teaches a real red-zone mistake, checkpoint rewind, conflict inspection and corrected detour', () => {
   assert.equal(PROLOGUE_STEPS.some(step => /高级参数|稳定比炫技/.test(step.text)), false)
-  assert.deepEqual(PROLOGUE_STEPS.filter(step => step.mode === 'action').map(step => step.id), ['A01', 'A02', 'A03', 'A04', 'A04-FOLLOW', 'A04-OVERVIEW', 'A07-CHECKPOINT', 'A08-RESTORE', 'A09-DETOUR'])
+  assert.deepEqual(PROLOGUE_STEPS.filter(step => step.mode === 'action').map(step => step.id), ['A01', 'A02', 'A03', 'A04', 'A04-FOLLOW', 'A04-OVERVIEW', 'A07-CHECKPOINT', 'A08-RESTORE', 'A09-CONFLICT', 'A09-DETOUR'])
   const ids = PROLOGUE_STEPS.map(step => step.id)
   assert.ok(ids.indexOf('D12') < ids.indexOf('WAIT-RED-VIOLATION'))
   assert.ok(ids.indexOf('WAIT-RED-VIOLATION') < ids.indexOf('A07-CHECKPOINT'))
   assert.ok(ids.indexOf('A07-CHECKPOINT') < ids.indexOf('A08-RESTORE'))
-  assert.ok(ids.indexOf('A08-RESTORE') < ids.indexOf('A09-DETOUR'))
+  assert.ok(ids.indexOf('A08-RESTORE') < ids.indexOf('A09-CONFLICT'))
+  assert.ok(ids.indexOf('A09-CONFLICT') < ids.indexOf('D14-INSPECT'))
+  assert.ok(ids.indexOf('D14-INSPECT') < ids.indexOf('A09-DETOUR'))
   assert.deepEqual([
     PROLOGUE_STEPS.find(step => step.id === 'A07-CHECKPOINT')?.targetId,
     PROLOGUE_STEPS.find(step => step.id === 'A08-RESTORE')?.targetId,
+    PROLOGUE_STEPS.find(step => step.id === 'A09-CONFLICT')?.targetId,
+    PROLOGUE_STEPS.find(step => step.id === 'D14-INSPECT')?.targetId,
     PROLOGUE_STEPS.find(step => step.id === 'A09-DETOUR')?.targetId
-  ], ['mission-rewind-checkpoint', 'mission-rewind-restore', 'airspace-detour'])
+  ], ['mission-rewind-checkpoint', 'mission-rewind-restore', 'red-airspace-conflict', 'airspace-inspector', 'airspace-detour'])
+  assert.equal(PROLOGUE_STEPS.find(step => step.id === 'A09-CONFLICT')?.completionCondition, 'red-airspace-inspected')
+  assert.equal(PROLOGUE_STEPS.find(step => step.id === 'D14-RETRY')?.targetId, undefined)
+  assert.match(PROLOGUE_STEPS.find(step => step.id === 'D14-RETRY')?.text || '', /接下来地图会重新给出.*空域冲突/)
   assert.equal(PROLOGUE_STEPS.find(step => step.id === 'D12')?.targetId, undefined)
   assert.match(PROLOGUE_STEPS.find(step => step.id === 'D12')?.text || '', /锁定提前处置/)
   assert.equal(PROLOGUE_STEPS.find(step => step.id === 'WAIT-RED-VIOLATION').completionCondition, 'red-fine-and-checkpoint-ready')
+  assert.match(PROLOGUE_STEPS.find(step => step.id === 'WAIT-RED-VIOLATION').text, /视角已切到无人机正后方/)
   assert.equal(PROLOGUE_STEPS.find(step => step.id === 'WAIT-DIAMOND').completionCondition, 'red-diamond-collected')
   assert.match(PROLOGUE_STEPS.find(step => step.id === 'D16-REWARD').text, /¥4,800/)
   const overlay = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialOverlay.vue'), 'utf8')
+  const engine = readFileSync(join(frontendRoot, 'src', 'tutorial', 'useTutorialEngine.js'), 'utf8')
+  const map = readFileSync(join(frontendRoot, 'src', 'components', 'LogisticsMissionMap.vue'), 'utf8')
   assert.match(overlay, /is-timeline-step/)
+  assert.match(engine, /currentStep\.value\.id === 'A09-CONFLICT'[\s\S]{0,180}redInspectorOpen\(\)/)
+  assert.match(engine, /currentStep\.value\.id === 'A09-CONFLICT'[\s\S]{0,320}runtime\.selectAirspace\(redVolumeId\)/)
+  assert.match(engine, /const RED_CONFLICT_UNLOCKED_STEPS = new Set\(\[\s*'A09-CONFLICT'/)
+  assert.doesNotMatch(engine, /RED_CONFLICT_UNLOCKED_STEPS = new Set\(\[[\s\S]{0,80}'D14-RETRY'/)
+  assert.match(engine, /function completeRewindAction[\s\S]{0,900}setTutorialRedConflictLocked\(true\)[\s\S]{0,120}closeAirspace\(\)/)
+  assert.match(engine, /function airspaceInspectorMustStayClosed[\s\S]{0,240}!RED_CONFLICT_UNLOCKED_STEPS\.has\(step\)/)
+  assert.match(engine, /watch\(\(\) => runtime\.selectedAirspaceId\.value[\s\S]{0,420}airspaceInspectorMustStayClosed\(\)[\s\S]{0,120}runtime\.closeAirspace\(\)/)
+  assert.match(engine, /const AIRSPACE_FREE_STEPS = new Set\(\['D16-REWARD', 'D17-BATTERY', 'D18-COMPLETE'\]\)/)
+  assert.match(engine, /if \(airspaceInspectorMustStayClosed\(step\)\) runtime\.closeAirspace\(\)/)
+  assert.match(map, /airspace-conflict-marker\.tutorial-target-active/)
+  assert.match(map, /@keyframes tutorial-conflict-invite/)
+  assert.match(map, /tutorial-conflict-invite \.9s ease-in-out 3,tutorial-conflict-breathe 2\.4s ease-in-out 2\.7s infinite/)
+  assert.match(map, /prefers-reduced-motion:reduce[\s\S]{0,420}airspace-conflict-marker\.tutorial-target-active/)
 })
 
-test('tutorial entry keeps its original card layout and the map legend sits above it', () => {
+test('clearing a focused device restores the mission overview camera', () => {
+  const map = readFileSync(join(frontendRoot, 'src', 'components', 'LogisticsMissionMap.vue'), 'utf8')
+  assert.match(map, /function showMissionOverview\(\)/)
+  assert.match(map, /if \(!deviceId\) \{ followingId\.value = ''; followZoomScale = 1; showMissionOverview\(\); return \}/)
+  assert.match(map, /const contextWillRestoreOverview = Boolean\(props\.selectedId\)/)
+  assert.match(map, /if \(!contextWillRestoreOverview\) showMissionOverview\(\)/)
+  assert.match(map, /if \(!fitted && viewportPoints\.length > 1\) \{\s*\/\/[\s\S]{0,420}if \(!flyToMissionOverview\(viewportPoints\)\)/)
+  assert.doesNotMatch(map, /!props\.planningPreview \|\| !flyToMissionOverview\(viewportPoints\)/)
+})
+
+test('tutorial entry uses a prominent readable card and the map legend clears it', () => {
   const beacon = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialBeacon.vue'), 'utf8')
   const map = readFileSync(join(frontendRoot, 'src', 'components', 'LogisticsMissionMap.vue'), 'utf8')
-  assert.match(beacon, /width:190px;height:52px/)
+  assert.match(beacon, /width:232px;height:68px/)
+  assert.match(beacon, /\.beacon-copy small\{[^}]*font-size:\.75rem/)
   assert.match(beacon, /MISSION MANUAL/)
   assert.match(beacon, /beacon-pointer/)
   assert.match(beacon, /is-attention/)
   assert.match(beacon, /prefers-reduced-motion:reduce/)
   assert.match(map, /id="mission-map-legend" class="map-legend"/)
-  assert.match(map, /\.map-legend \{[^}]*right:18px; bottom:84px/)
+  assert.match(map, /\.map-legend \{[^}]*right:24px; bottom:104px/)
   assert.doesNotMatch(map, /map-legend-toggle|legendOpen/)
 })

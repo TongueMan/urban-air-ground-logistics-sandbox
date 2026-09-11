@@ -36,6 +36,8 @@ const TARGET_DELAY_NOTICE = 12000
 const RED_FINE_REACTION_DURATION = 3500
 const REWIND_INTERACTION_STEPS = new Set(['A07-CHECKPOINT', 'A08-RESTORE'])
 const PREMATURE_REWIND_RECOVERY_STEPS = new Set(['WAIT-RED-VIOLATION', 'D13-REWIND', 'A07-CHECKPOINT', 'A08-RESTORE'])
+const RED_INSPECTOR_REQUIRED_STEPS = new Set(['D14-INSPECT', 'A09-DETOUR'])
+const AIRSPACE_FREE_STEPS = new Set(['D16-REWARD', 'D17-BATTERY', 'D18-COMPLETE'])
 
 export function useTutorialEngine(runtime, fleetRuntime) {
   const state = ref(createTutorialState())
@@ -169,6 +171,18 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     return runtime.context?.rawSnapshot?.value?.mission || runtime.context?.mission?.value?.source?.mission || null
   }
 
+  function focusRedCourseDrone() {
+    const droneId = String(runtime.context?.mission?.value?.actors
+      ?.find(actor => actor.kind === 'UAV')?.id || '')
+    return Boolean(droneId && runtime.context?.focusActor(droneId))
+  }
+
+  function restoreRedCourseOverview(stepId = currentStep.value?.id) {
+    if (stepId !== 'D13-REWIND' || !runtime.context?.focusedActorId?.value) return false
+    runtime.context.clearFocus()
+    return true
+  }
+
   function activeRunId() {
     return String(runtime.session.value?.id || '')
   }
@@ -214,6 +228,18 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     return red?.selectedAction || null
   }
 
+  function redInspectorOpen() {
+    const redVolumeId = String(progressContext.value.redVolumeId || '')
+    return Boolean(redVolumeId && String(runtime.selectedAirspaceId.value || '') === redVolumeId)
+  }
+
+  function ensureRedInspectorOpen(stepId = currentStep.value?.id) {
+    if (!RED_INSPECTOR_REQUIRED_STEPS.has(String(stepId || '')) || redInspectorOpen()) return false
+    const redVolumeId = String(progressContext.value.redVolumeId || '')
+    if (!redVolumeId) return false
+    return runtime.selectAirspace(redVolumeId) !== false
+  }
+
   function redDiamondCollected() {
     const id = String(progressContext.value.redDiamondId || '')
     const collected = activeMission()?.economy?.collectedDiamondIds || []
@@ -221,19 +247,25 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   }
 
   const RED_CONFLICT_UNLOCKED_STEPS = new Set([
-    'D14-RETRY', 'A09-DETOUR', 'D15-DETOUR', 'WAIT-DIAMOND',
+    'A09-CONFLICT', 'D14-INSPECT', 'A09-DETOUR', 'D15-DETOUR', 'WAIT-DIAMOND',
     'D16-REWARD', 'D17-BATTERY', 'D18-COMPLETE'
   ])
 
+  function airspaceInspectorMustStayClosed(stepId = currentStep.value?.id) {
+    const step = String(stepId || '')
+    return !RED_CONFLICT_UNLOCKED_STEPS.has(step) || AIRSPACE_FREE_STEPS.has(step)
+  }
+
   function configureProloguePresentationGuards(stepId = currentStep.value?.id) {
     runtime.setTutorialMissionReactionsSuppressed(true)
-    const conflictUnlocked = RED_CONFLICT_UNLOCKED_STEPS.has(String(stepId || ''))
+    const step = String(stepId || '')
+    const conflictUnlocked = RED_CONFLICT_UNLOCKED_STEPS.has(step)
     runtime.setTutorialRedConflictLocked(!conflictUnlocked)
-    if (!conflictUnlocked) runtime.closeAirspace()
+    if (airspaceInspectorMustStayClosed(step)) runtime.closeAirspace()
+    else ensureRedInspectorOpen(step)
     // A07 itself unlocks only once its instruction is visible. Preserve that
     // selection through A07 success and the A08 transition so the real restore
     // button remains available, then lock the timeline again at D14.
-    const step = String(stepId || '')
     const rewindUnlocked = (
       step === 'A07-CHECKPOINT'
       && [TUTORIAL_PHASES.ACTION, TUTORIAL_PHASES.ACTION_SUCCESS].includes(phase.value)
@@ -585,6 +617,13 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       dispatch({ type: 'ACTION_WAIT' })
       return
     }
+    if (currentStep.value.id === 'A09-CONFLICT') {
+      window.setTimeout(() => {
+        if (redInspectorOpen()) completeAction()
+        else registerWrongInteraction()
+      }, 0)
+      return
+    }
     if (currentStep.value.id === 'A09-DETOUR' && !runtime.airspaceActionBusy.value && !state.value.waiting) {
       detourFailed.value = false
       detourActionStarted = true
@@ -698,6 +737,10 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       setTarget(null)
       return
     }
+    if (['D14-RETRY', 'A09-CONFLICT'].includes(currentStep.value.id) && redInspectorOpen()) {
+      setTarget(null)
+      return
+    }
     setTarget(document.querySelector(`[data-tutorial-id="${currentStep.value.targetId}"]`))
   }
 
@@ -719,6 +762,14 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     targetDelayTimer = window.setTimeout(() => {
       if (normalizeTimelineTutorialState()) return
       refreshTarget()
+      if (!targetElement.value && currentStep.value.id === 'A09-CONFLICT'
+        && phase.value === TUTORIAL_PHASES.ACTION && tutorialRunMatches()) {
+        const redVolumeId = String(progressContext.value.redVolumeId || '')
+        if (redVolumeId && runtime.selectAirspace(redVolumeId) !== false) {
+          nextTick(evaluateCurrentCondition)
+          return
+        }
+      }
       if (!targetElement.value) targetSyncDelayed.value = true
     }, TARGET_DELAY_NOTICE)
   }
@@ -862,6 +913,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     redCourseFailed.value = false
     try {
       if (runtime.context?.timeMode.value === 'REPLAY') runtime.context.returnToLive()
+      focusRedCourseDrone()
       const released = progressContext.value.pausedByTutorial
         ? await releaseTutorialPause()
         : (Number(runtime.timeScale.value) > 0
@@ -934,7 +986,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     runtime.clearTutorialRedConflictLocked()
     runtime.setTutorialRewindLocked(true)
     runtime.context.returnToLive()
-    runtime.selectAirspace(progressContext.value.redVolumeId)
+    runtime.closeAirspace()
     dispatch({ type: 'RESUME', stepId: 'D14-RETRY' })
     recordProgress(TUTORIAL_CHAPTER, 'in_progress', 'D14-RETRY')
     return true
@@ -968,7 +1020,12 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     if (String(ack.id || '') !== String(progressContext.value.rewindCheckpointId || '')
       || String(ack.volumeId || '') !== String(progressContext.value.redVolumeId || '')) return false
     rewindFailed.value = false
-    runtime.clearTutorialRedConflictLocked()
+    // The rewind response selects its associated red volume. Keep the inspector
+    // closed and the conflict entry hidden until A09-CONFLICT is actually ready,
+    // otherwise an eager click (or the response selection itself) can skip the
+    // required card interaction and strand target tracking on an open panel.
+    runtime.setTutorialRedConflictLocked(true)
+    runtime.closeAirspace()
     completeAction()
     return true
   }
@@ -1010,6 +1067,8 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       else void beginRedCourseObservation()
     } else if (currentStep.value.id === 'A08-RESTORE') {
       completeRewindAction()
+    } else if (currentStep.value.id === 'A09-CONFLICT') {
+      if (redInspectorOpen()) completeAction()
     } else if (currentStep.value.id === 'A09-DETOUR') {
       void completeDetourAction()
     } else if (currentStep.value.id === 'WAIT-DIAMOND' && redDiamondCollected()) {
@@ -1021,6 +1080,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   watch(() => [activeChapterId.value, currentStep.value.id, phase.value], () => {
     if (activeChapterId.value === TUTORIAL_CHAPTER && isActive.value) {
       configureProloguePresentationGuards(currentStep.value.id)
+      restoreRedCourseOverview(currentStep.value.id)
     }
     if (isActive.value && ![TUTORIAL_PHASES.INTRO, TUTORIAL_PHASES.COMPLETE].includes(phase.value)) {
       recordProgress(activeChapterId.value, 'in_progress', currentStep.value.id)
@@ -1095,7 +1155,19 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       dispatch({ type: 'ACTION_RETRY' })
     }
   }, { flush: 'post' })
-  watch(() => runtime.selectedAirspaceId.value, evaluateCurrentCondition, { flush: 'post' })
+  watch(() => runtime.selectedAirspaceId.value, () => {
+    if (activeChapterId.value === TUTORIAL_CHAPTER && isActive.value) {
+      // Rewind acknowledgement can select the associated volume after the
+      // restore action has already closed it. Reject that late selection until
+      // A09-CONFLICT is visible so the player still performs the taught click.
+      if (airspaceInspectorMustStayClosed() && runtime.selectedAirspaceId.value) {
+        runtime.closeAirspace()
+        return
+      }
+      ensureRedInspectorOpen()
+    }
+    evaluateCurrentCondition()
+  }, { flush: 'post' })
   watch(() => runtime.mapFollowingDeviceId.value, evaluateCurrentCondition, { flush: 'post' })
   watch([
     () => runtime.latestEconomyTransaction?.value?.id,

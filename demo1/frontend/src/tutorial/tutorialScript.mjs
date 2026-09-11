@@ -9,12 +9,12 @@ export const FLEET_TUTORIAL_STORAGE_KEY = 'skyfleet.tutorial.fleet-center.v1'
 export const PROLOGUE_TUTORIAL_SEED = '1204'
 
 export const PROLOGUE_STEPS = Object.freeze([
-  { id: 'D01', mode: 'dialogue', speaker: 'anan', expression: 'greeting', text: '终于等到你了。今天这片物流运营区，就交给我们三个。', highlights: [{ text: '物流运营区', tone: 'cyan' }, { text: '我们三个', tone: 'mint' }], advance: 'dialogue' },
-  { id: 'D02', mode: 'dialogue', speaker: 'cheng', expression: 'default', text: '纠正一下。真正听指令的是配送车和配送无人机。', highlights: [{ text: '配送车和配送无人机', tone: 'cyan' }], advance: 'dialogue' },
-  { id: 'D03', mode: 'dialogue', speaker: 'anan', expression: 'awkward', text: '……第一分钟就拆台？', advance: 'dialogue' },
-  { id: 'D04', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '避免新负责人误把我算进设备清单。', highlights: [{ text: '设备清单', tone: 'amber' }], advance: 'dialogue' },
-  { id: 'D05', mode: 'dialogue', speaker: 'anan', expression: 'default', text: '看地图。路线、空域和编组都在这里，先别急着背下每个读数。', highlights: [{ text: '路线、空域和编组', tone: 'cyan' }], advance: 'dialogue' },
-  { id: 'D06', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: '你的第一件事，是生成一份经过校验的配送方案。', highlights: [{ text: '经过校验的配送方案', tone: 'mint' }], advance: 'dialogue' },
+  { id: 'D01', mode: 'dialogue', speaker: 'anan', expression: 'greeting', text: '欢迎来到合肥城市空地协同物流运营中心。城市订单持续涌入，地面道路与低空航线必须协同，配送才能准时完成。', highlights: [{ text: '城市空地协同物流运营中心', tone: 'cyan' }, { text: '地面道路与低空航线', tone: 'mint' }], advance: 'dialogue' },
+  { id: 'D02', mode: 'dialogue', speaker: 'cheng', expression: 'default', text: '从现在起，你是这里的新任运营调度负责人。你不直接驾驶设备，而是通过这套平台组织订单、车辆、无人机与数字空域。', highlights: [{ text: '新任运营调度负责人', tone: 'amber' }, { text: '订单、车辆、无人机与数字空域', tone: 'cyan' }], advance: 'dialogue' },
+  { id: 'D03', mode: 'dialogue', speaker: 'anan', expression: 'default', text: '眼前的城市地图就是你的指挥台：路线反映地面通行，彩色空域标出低空限制，任务编组显示正在执行配送的设备。', highlights: [{ text: '城市地图就是你的指挥台', tone: 'mint' }, { text: '路线、空域和任务编组', tone: 'cyan' }], advance: 'dialogue' },
+  { id: 'D04', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '我是程昱，负责风险与数据分析；阿南负责一线引导。你做调度决策，我们帮你看清每个选择的后果。', highlights: [{ text: '风险与数据分析', tone: 'cyan' }, { text: '调度决策', tone: 'amber' }, { text: '选择的后果', tone: 'mint' }], advance: 'dialogue' },
+  { id: 'D05', mode: 'dialogue', speaker: 'anan', expression: 'greeting', text: '初始车队已经准备好：满电的城市货运三轮车和配送无人机均已出站，可以直接投入你的第一项任务。', highlights: [{ text: '满电', tone: 'mint' }, { text: '均已出站', tone: 'cyan' }, { text: '第一项任务', tone: 'amber' }], advance: 'dialogue' },
+  { id: 'D06', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: '你的目标是在时效、电量、资金与空域安全之间做出选择。先完成一单教学配送，熟悉平台如何规划、运行和纠错。', highlights: [{ text: '时效、电量、资金与空域安全', tone: 'cyan' }, { text: '规划、运行和纠错', tone: 'mint' }], advance: 'dialogue' },
   { id: 'A01', mode: 'action', speaker: 'anan', expression: 'guide', text: '右上角。打开配送任务规划器，我们从真实订单开始。', highlights: [{ text: '配送任务规划器', tone: 'cyan' }, { text: '真实订单', tone: 'mint' }], targetId: 'create-mission', spotlight: true, advance: 'target-click', completionCondition: 'planner-open' },
   { id: 'D07', mode: 'dialogue', speaker: 'anan', expression: 'default', text: '物流运营区已经替你选好，也可以换成另外两个校核区域。', highlights: [{ text: '物流运营区', tone: 'cyan' }, { text: '校核区域', tone: 'amber' }], targetId: 'mission-area', spotlight: true, advance: 'dialogue' },
   { id: 'D08', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: '这次训练需要同时识别四种空域。把禁飞区数量选成 4，红、黄、紫、橙会一起出现。', highlights: [{ text: '禁飞区数量选成 4', tone: 'amber' }, { text: '红、黄、紫、橙', tone: 'cyan' }], targetId: 'mission-zone-count', spotlight: true, advance: 'dialogue' },
@@ -30,11 +30,13 @@ export const PROLOGUE_STEPS = Object.freeze([
   { id: 'A04-OVERVIEW', mode: 'action', speaker: 'anan', expression: 'guide', text: '现在点击“返回总览”，确认镜头重新收拢到本局路线、配送点和空域。', highlights: [{ text: '返回总览', tone: 'mint' }, { text: '本局路线、配送点和空域', tone: 'cyan' }], targetId: 'return-mission-overview', spotlight: true, advance: 'condition', completionCondition: 'mission-overview-restored' },
   { id: 'D11-MOUSE', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '还有三项基础操作：按住鼠标左键拖动可平移地图，滚轮可缩放地图；按住滚轮拖动，则能调整地图朝向与俯视角度。', highlights: [{ text: '鼠标左键拖动', tone: 'cyan' }, { text: '滚轮可缩放', tone: 'mint' }, { text: '按住滚轮拖动', tone: 'amber' }], targetId: 'mission-map-interaction', spotlight: true, advance: 'dialogue' },
   { id: 'D12', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: '前方是红色绝对禁飞区。第一次训练会暂时锁定提前处置，让无人机保持原航线；先亲眼看看侵入警告和罚款。', highlights: [{ text: '红色绝对禁飞区', tone: 'amber' }, { text: '锁定提前处置', tone: 'cyan' }, { text: '侵入警告和罚款', tone: 'mint' }], advance: 'dialogue' },
-  { id: 'WAIT-RED-VIOLATION', mode: 'system', speaker: 'anan', expression: 'guide', text: '无人机正在沿原航线接近红色禁飞区。红区处置入口会保持隐藏，系统触发真实警告与罚款后将自动暂停。', highlights: [{ text: '沿原航线', tone: 'cyan' }, { text: '处置入口会保持隐藏', tone: 'amber' }, { text: '真实警告与罚款', tone: 'mint' }], advance: 'condition', completionCondition: 'red-fine-and-checkpoint-ready' },
+  { id: 'WAIT-RED-VIOLATION', mode: 'system', speaker: 'anan', expression: 'guide', text: '视角已切到无人机正后方。请观察它沿原航线接近红色禁飞区；你仍可缩放或返回总览。红区处置入口会保持隐藏，系统触发真实警告与罚款后将自动暂停。', highlights: [{ text: '无人机正后方', tone: 'cyan' }, { text: '沿原航线', tone: 'cyan' }, { text: '缩放或返回总览', tone: 'amber' }, { text: '真实警告与罚款', tone: 'mint' }], advance: 'condition', completionCondition: 'red-fine-and-checkpoint-ready' },
   { id: 'D13-REWIND', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: '刚才的禁飞警告和罚款就是错误分支。看下方回溯条：黄色关键节点保存了进入红区前的任务、设备电量和资金状态。', highlights: [{ text: '错误分支', tone: 'amber' }, { text: '黄色关键节点', tone: 'cyan' }, { text: '进入红区前', tone: 'mint' }], targetId: 'mission-timeline', spotlight: true, advance: 'dialogue' },
   { id: 'A07-CHECKPOINT', mode: 'action', speaker: 'anan', expression: 'guide', text: '点击回溯条上的黄色关键节点，先预览当时的任务状态。', highlights: [{ text: '黄色关键节点', tone: 'amber' }, { text: '预览当时的任务状态', tone: 'cyan' }], targetId: 'mission-rewind-checkpoint', spotlight: true, advance: 'condition', completionCondition: 'red-checkpoint-previewed' },
   { id: 'A08-RESTORE', mode: 'action', speaker: 'anan', expression: 'guide', text: '确认时间点无误后，点击“回到这里重新选择”。节点之后的罚款、轨迹和设备消耗会被撤销。', highlights: [{ text: '回到这里重新选择', tone: 'mint' }, { text: '罚款、轨迹和设备消耗', tone: 'amber' }, { text: '被撤销', tone: 'cyan' }], targetId: 'mission-rewind-restore', spotlight: true, advance: 'condition', completionCondition: 'red-checkpoint-restored' },
-  { id: 'D14-RETRY', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '回溯完成。我们已经回到警告前，刚才的错误分支不再计入当前时间线。现在重新选择安全方案。', highlights: [{ text: '回到警告前', tone: 'mint' }, { text: '错误分支不再计入', tone: 'cyan' }, { text: '安全方案', tone: 'amber' }], targetId: 'airspace-detour', spotlight: true, advance: 'dialogue' },
+  { id: 'D14-RETRY', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '回溯完成。我们已经回到警告前，刚才的错误分支不再计入当前时间线。接下来地图会重新给出“空域冲突”卡片，它是查看风险与处置方案的入口。', highlights: [{ text: '回到警告前', tone: 'mint' }, { text: '错误分支不再计入', tone: 'cyan' }, { text: '空域冲突', tone: 'amber' }, { text: '查看风险与处置方案的入口', tone: 'cyan' }], advance: 'dialogue' },
+  { id: 'A09-CONFLICT', mode: 'action', speaker: 'anan', expression: 'guide', text: '点击正在呼吸闪动的“空域冲突”卡片，打开右侧禁飞区详情。', highlights: [{ text: '空域冲突', tone: 'amber' }, { text: '右侧禁飞区详情', tone: 'cyan' }], targetId: 'red-airspace-conflict', spotlight: true, advance: 'condition', completionCondition: 'red-airspace-inspected' },
+  { id: 'D14-INSPECT', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: '右侧详情会说明空域类型、生效状态、侵入罚款、关联粉钻与可用处置方案。以后遇到冲突，先点卡片看清规则，再决定航线。', highlights: [{ text: '空域类型、生效状态、侵入罚款', tone: 'cyan' }, { text: '关联粉钻', tone: 'amber' }, { text: '先点卡片看清规则', tone: 'mint' }], targetId: 'airspace-inspector', spotlight: true, advance: 'dialogue' },
   { id: 'A09-DETOUR', mode: 'action', speaker: 'anan', expression: 'guide', text: '这一次选择“从侧面绕飞”。系统会重算可执行航线，并恢复回溯前的仿真速度。', highlights: [{ text: '从侧面绕飞', tone: 'mint' }, { text: '重算可执行航线', tone: 'cyan' }, { text: '恢复', tone: 'amber' }], targetId: 'airspace-detour', spotlight: true, advance: 'condition', completionCondition: 'red-detour-applied' },
   { id: 'D15-DETOUR', mode: 'dialogue', speaker: 'anan', expression: 'greeting', text: '绕飞航线已经切换，仿真也恢复了。粉钻不是点按钮领取的，让无人机沿新路线真正飞过去。', highlights: [{ text: '绕飞航线已经切换', tone: 'mint' }, { text: '真正飞过去', tone: 'cyan' }], advance: 'dialogue' },
   { id: 'WAIT-DIAMOND', mode: 'system', speaker: 'anan', expression: 'guide', text: '无人机正在沿绕飞路线接近粉钻。你可以继续观察地图，也可以从任务控制调节仿真速度。', highlights: [{ text: '沿绕飞路线接近粉钻', tone: 'mint' }, { text: '任务控制', tone: 'cyan' }], advance: 'condition', completionCondition: 'red-diamond-collected' },
@@ -59,8 +61,8 @@ export const FLEET_CENTER_STEPS = Object.freeze([
 ])
 
 export const PLANNER_DEPENDENT_STEPS = new Set(['D07', 'D08', 'A02', 'A03', 'D09', 'A04'])
-export const AIRSPACE_PANEL_DEPENDENT_STEPS = new Set(['D14-RETRY', 'A09-DETOUR'])
-export const RUN_DEPENDENT_STEPS = new Set(['D10', 'D11', 'D11-DEVICE', 'A04-FOLLOW', 'D11-FOLLOW', 'A04-OVERVIEW', 'D11-MOUSE', 'D12', 'WAIT-RED-VIOLATION', 'D13-REWIND', 'A07-CHECKPOINT', 'A08-RESTORE', 'D14-RETRY', 'A09-DETOUR', 'D15-DETOUR', 'WAIT-DIAMOND', 'D16-REWARD', 'D17-BATTERY', 'D18-COMPLETE'])
+export const AIRSPACE_PANEL_DEPENDENT_STEPS = new Set(['D14-INSPECT', 'A09-DETOUR'])
+export const RUN_DEPENDENT_STEPS = new Set(['D10', 'D11', 'D11-DEVICE', 'A04-FOLLOW', 'D11-FOLLOW', 'A04-OVERVIEW', 'D11-MOUSE', 'D12', 'WAIT-RED-VIOLATION', 'D13-REWIND', 'A07-CHECKPOINT', 'A08-RESTORE', 'D14-RETRY', 'A09-CONFLICT', 'D14-INSPECT', 'A09-DETOUR', 'D15-DETOUR', 'WAIT-DIAMOND', 'D16-REWARD', 'D17-BATTERY', 'D18-COMPLETE'])
 export const FLEET_HUB_DEPENDENT_STEPS = new Set(FLEET_CENTER_STEPS.slice(3).map(step => step.id))
 
 export const TUTORIAL_CHAPTERS = Object.freeze([
@@ -69,12 +71,12 @@ export const TUTORIAL_CHAPTERS = Object.freeze([
     index: '00',
     eyebrow: 'PROLOGUE',
     title: '新任调度员报到',
-    description: '和阿南、程昱一起生成并启动第一局配送任务，掌握地图视角、设备跟随与关键节点回溯，完成红色空域绕飞并领取粉钻。',
+    description: '作为城市空地物流的新任运营调度负责人，和阿南、程昱完成第一局配送，认识平台并掌握地图、设备跟随、空域处置与关键节点回溯。',
     storageKey: TUTORIAL_STORAGE_KEY,
     version: TUTORIAL_VERSION,
     steps: PROLOGUE_STEPS,
     introKicker: 'MISSION MANUAL / PROLOGUE 00',
-    introSubtitle: 'FIRST DELIVERY PLAN',
+    introSubtitle: 'CITY AIR-GROUND LOGISTICS COMMAND',
     completeKicker: 'OPERATOR READY',
     completeTitle: 'PROLOGUE COMPLETE',
     completeSubtitle: '关键节点回溯、红色空域绕飞与粉钻领取已完成'

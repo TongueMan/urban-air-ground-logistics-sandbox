@@ -251,6 +251,27 @@ class TaskInstanceServiceEconomyTest {
     }
 
     @Test
+    void tutorialBatteryProtectionUsesVirtualFullBatteryWithoutHidingUsageEstimates() throws Exception {
+        TaskInstanceService service = fixture(0, 0);
+
+        Map<String, Object> generated = service.generate(VISITOR, "hefei-logistics-area-a", "115",
+                Map.of("deliveryDensity", "STANDARD", "tutorialBatteryProtected", true));
+        Map<String, Object> protectedPlan = plan(generated);
+        Map<String, Object> quote = map(protectedPlan.get("economyQuote"));
+
+        assertThat(protectedPlan).containsEntry("tutorialBatteryProtected", true);
+        assertThat(map(protectedPlan.get("groundVehicle"))).containsEntry("batteryPercent", 100.0);
+        assertThat(map(protectedPlan.get("airVehicle"))).containsEntry("batteryPercent", 100.0);
+        assertThat(maps(protectedPlan.get("actors")))
+                .filteredOn(actor -> "VEHICLE".equals(actor.get("kind")) || "UAV".equals(actor.get("kind")))
+                .allSatisfy(actor -> assertThat(actor).containsEntry("initialBattery", 100.0));
+        assertThat(quote).containsEntry("groundBatterySufficient", true)
+                .containsEntry("airBatterySufficient", true)
+                .containsEntry("batterySufficient", true)
+                .containsKeys("estimatedGroundBatteryUsePercent", "estimatedAirBatteryUsePercent");
+    }
+
+    @Test
     void readinessQuoteIncludesTheRequestedReturnReserve() throws Exception {
         TaskInstanceService service = fixture(50, 50);
 

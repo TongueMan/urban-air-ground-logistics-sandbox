@@ -9,6 +9,16 @@ function finiteVersion(value) {
   return Number.isFinite(version) ? version : null
 }
 
+function usesTutorialBattery(mission) {
+  const sourceMission = mission?.source?.mission || {}
+  return Boolean(
+    mission?.tutorialBatteryProtected
+    || mission?.resolvedParameters?.tutorialBatteryProtected
+    || sourceMission?.tutorialBatteryProtected
+    || sourceMission?.resolvedParameters?.tutorialBatteryProtected
+  )
+}
+
 /**
  * Resolve the authoritative fleet state shown by the idle/preview instrument.
  * A running mission keeps using mission telemetry because the fleet snapshot is
@@ -16,6 +26,11 @@ function finiteVersion(value) {
  * and the one-minute charging projection should replace the frozen preview.
  */
 export function instrumentFleetVehicleState(mission = {}, snapshot = {}, category = 'GROUND', now = Date.now()) {
+  // Tutorial runs deliberately use a virtual full battery. Do not let the
+  // idle fleet snapshot replace that value with the real asset battery in the
+  // preview instrument; live run telemetry remains authoritative afterwards.
+  if (usesTutorialBattery(mission)) return null
+
   const status = String(mission?.status || '').toUpperCase()
   if (LIVE_MISSION_STATES.has(status)) return null
 

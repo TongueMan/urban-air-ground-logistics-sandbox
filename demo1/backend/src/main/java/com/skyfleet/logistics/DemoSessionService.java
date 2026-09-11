@@ -289,8 +289,10 @@ public class DemoSessionService {
             double checkpointAirBattery = number(state.get("airBatteryPercent"), session.airBatteryPercent);
             Map<String, Object> economyAdjustment = fleet.rewindMissionTransactions(visitorHash, session.id,
                     sourceEpoch, targetEpoch, checkpoint.simulationTimeMs, checkpoint.id, rewindId);
-            fleet.restoreRunAssets(visitorHash, session.id, session.groundAssetId, checkpointGroundBattery,
-                    session.airAssetId, checkpointAirBattery);
+            if (!tutorialBatteryProtected(session)) {
+                fleet.restoreRunAssets(visitorHash, session.id, session.groundAssetId, checkpointGroundBattery,
+                        session.airAssetId, checkpointAirBattery);
+            }
             supersedeTimelineAfter(session, checkpoint, rewindId, sourceEpoch);
             restoreCheckpointState(session, checkpoint, targetEpoch);
 
@@ -1509,6 +1511,7 @@ public class DemoSessionService {
                 ? mapper.convertValue(value, new TypeReference<>() {}) : Map.of();
         double launchProgress = number(rendezvous.get("launchRouteProgress"), 18);
         double recoveryProgress = number(rendezvous.get("recoveryRouteProgress"), 85);
+        boolean batteryProtected = tutorialBatteryProtected(session);
 
         for (Map<String, Object> actor : vehicles) {
             String actorId = String.valueOf(actor.get("id"));
@@ -1524,8 +1527,9 @@ public class DemoSessionService {
             if (waitingForUav && current <= recoveryProgress) proposed = Math.min(proposed, recoveryProgress);
             TrafficRuleEngine.Decision decision = trafficLights.govern(definition(session), routeId, current, proposed, routeDistance, session.simulationElapsedMs);
             double requestedMeters = Math.max(0, decision.nextProgress() - current) / 100 * routeDistance;
-            FleetService.BatteryUse batteryUse = fleet.consumeGroundDistance(session.visitorHash, session.id,
-                    session.groundAssetId, requestedMeters, fullRangeKm);
+            FleetService.BatteryUse batteryUse = batteryProtected
+                    ? protectedBatteryUse(requestedMeters, session.groundBatteryPercent)
+                    : fleet.consumeGroundDistance(session.visitorHash, session.id, session.groundAssetId, requestedMeters, fullRangeKm);
             double nextProgress = MissionMath.clamp(current + batteryUse.movedMeters() / routeDistance * 100, 0, 100);
             session.groundBatteryPercent = batteryUse.batteryPercent();
             session.routeProgress.put(actorId, nextProgress);
@@ -1584,8 +1588,10 @@ public class DemoSessionService {
                 double[] requestedFrom = MissionMath.sample(points(session, routeId), currentRouteProgress / 100);
                 double[] requestedTo = MissionMath.sample(points(session, routeId), proposedRouteProgress / 100);
                 EnergyExposure energyExposure = airEnergyExposure(session, requestedFrom, requestedTo);
-                FleetService.BatteryUse batteryUse = fleet.consumeAirDistance(session.visitorHash, session.id,
-                        session.airAssetId, requestedMeters, airFullRangeKm, energyExposure.multiplier());
+                FleetService.BatteryUse batteryUse = batteryProtected
+                        ? protectedBatteryUse(requestedMeters, session.airBatteryPercent)
+                        : fleet.consumeAirDistance(session.visitorHash, session.id, session.airAssetId, requestedMeters,
+                        airFullRangeKm, energyExposure.multiplier());
                 session.airEnergyMultipliers.put(actorId, energyExposure.multiplier());
                 if (energyExposure.volumeId() == null) session.airRiskVolumeIds.remove(actorId);
                 else session.airRiskVolumeIds.put(actorId, energyExposure.volumeId());
@@ -2010,6 +2016,17 @@ public class DemoSessionService {
             if (AirspaceGeometry.conflict(route, volume, 0) != null) route = AirspaceGeometry.detour(route, volume, 0);
         }
         return route;
+    }
+
+    private boolean tutorialBatteryProtected(DemoSession session) {
+        Map<String, Object> mission = definition(session);
+        return Boolean.TRUE.equals(mission.get("tutorialBatteryProtected"))
+                || Boolean.TRUE.equals(castMap(mission.get("resolvedParameters")).get("tutorialBatteryProtected"));
+    }
+
+    private static FleetService.BatteryUse protectedBatteryUse(double requestedMeters, double batteryPercent) {
+        double movedMeters = Math.max(0, requestedMeters);
+        return new FleetService.BatteryUse(movedMeters, batteryPercent, false, movedMeters, 0);
     }
 
     @SuppressWarnings("unchecked")

@@ -39,6 +39,23 @@ class FleetServiceTest {
     }
 
     @Test
+    void returningVisitorKeepsTheirFleetStatusAndBatteryInsteadOfBeingReinitialized() {
+        Fixture fixture = fixture(true);
+        Map<String, Object> initial = fixture.service.snapshot(VISITOR_A);
+        String tricycleId = assets(initial).stream()
+                .filter(asset -> "tricycle".equals(asset.get("typeId")))
+                .map(asset -> String.valueOf(asset.get("assetId"))).findFirst().orElseThrow();
+        fixture.jdbc.update("UPDATE fleet_asset SET asset_status='GARAGED',battery_basis_points=4200,state_version=7 WHERE id=?", tricycleId);
+
+        Map<String, Object> revisited = fixture.service.snapshot(VISITOR_A);
+
+        assertThat(asset(revisited, tricycleId)).containsEntry("status", "GARAGED");
+        assertThat(asset(revisited, tricycleId).get("batteryPercent")).isEqualTo(42.0);
+        assertThat(asset(revisited, tricycleId).get("stateVersion")).isEqualTo(7L);
+        assertThat(assets(revisited)).hasSize(2);
+    }
+
+    @Test
     void catalogPublishesExactGroundAndAirGameplayStats() {
         Map<String, Object> snapshot = fixture(true).service.snapshot(VISITOR_A);
         assertGroundType(snapshot, "tricycle", List.of(2, 5, 2, 2), 18, 5, 1.5);

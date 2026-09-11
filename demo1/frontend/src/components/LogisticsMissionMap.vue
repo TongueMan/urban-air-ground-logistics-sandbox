@@ -83,6 +83,7 @@ let hitLayer = null, pickLayer = null, missionPointLayer = null, missionPointSig
 let airspaceLabelLayer = null, conflictLabelLayer = null, airspaceStructureSignature = '', airspaceLabelSignature = '', conflictLabelSignature = ''
 let liveTrafficLights = [], trafficLightRenderedStateSignature = '', trafficLightRenderedNode = null
 const routeLayers = new Map(), routeSamplers = new Map(), modelRecords = new Map(), coinRecords = new Map(), coinPopups = new Map(), airspaceVisuals = new Map(), gltfLoader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder)
+const conflictAttentionStartedAt = new Map(), viewedConflictKeys = new Set()
 const pointLayerSignatures = { hit: '', pick: '' }
 const MODEL_ASSET_REVISION = 'fleet-deployment-v1'
 const COIN_ASSET_ID = 'gold-coin'
@@ -277,12 +278,25 @@ function renderConflictLabel(item) {
   const attributes = item?.attributes || item
   const node = document.createElement('button'); node.type = 'button'; node.className = `airspace-conflict-marker threat-${String(attributes.threatLevel || 'conflict').toLowerCase()}`
   if (String(attributes.ruleType || '') === 'ABSOLUTE_NO_FLY') node.dataset.tutorialId = 'red-airspace-conflict'
+  const interactionKey = `${props.mission?.taskId || props.mission?.simulationId || props.mission?.scenarioKey || 'mission'}:${attributes.volumeId}`
+  const attentionStartedAt = conflictAttentionStartedAt.get(interactionKey) || Date.now()
+  if (!conflictAttentionStartedAt.has(interactionKey)) conflictAttentionStartedAt.set(interactionKey, attentionStartedAt)
+  if (viewedConflictKeys.has(interactionKey)) node.classList.add('is-viewed')
+  else if (Date.now() - attentionStartedAt < 4200) node.classList.add('is-click-inviting')
   const predictive = attributes.predictive === true || attributes.predictive === 'true'
   const active = attributes.currentlyActive === true || attributes.currentlyActive === 'true'
   const title = document.createElement('b'); title.textContent = predictive ? '◇  预测冲突' : '×  空域冲突'
   const detail = document.createElement('span'); detail.textContent = `${attributes.distance} 米 · 预计 ${attributes.eta} 秒`
-  node.setAttribute('aria-label', `${predictive ? '预测空域冲突' : '空域冲突'}，${active ? '空域当前生效' : '空域当前未生效'}，预计${attributes.eta}秒后到达`)
-  node.append(title, detail); node.addEventListener('click', event => { event.stopPropagation(); emit('select-airspace', String(attributes.volumeId || '')) })
+  const affordance = document.createElement('small'); affordance.textContent = '点击查看处置  →'
+  node.title = '点击打开右侧空域详情与处置方案'
+  node.setAttribute('aria-label', `${predictive ? '预测空域冲突' : '空域冲突'}，${active ? '空域当前生效' : '空域当前未生效'}，预计${attributes.eta}秒后到达，点击查看处置方案`)
+  node.append(title, detail, affordance); node.addEventListener('click', event => {
+    event.stopPropagation()
+    viewedConflictKeys.add(interactionKey)
+    node.classList.remove('is-click-inviting')
+    node.classList.add('is-viewed')
+    emit('select-airspace', String(attributes.volumeId || ''))
+  })
   return node
 }
 function pointSource(points) {
@@ -1515,7 +1529,11 @@ function updateRoutes() {
   airspaceVolumes().forEach(volume => viewportPoints.push(...coordinates(volume.footprint, Number(volume.floorMeters || 0))))
   currentMissionViewportPoints = viewportPoints.map(point => point.slice())
   if (!fitted && viewportPoints.length > 1) {
-    if (!props.planningPreview || !flyToMissionOverview(viewportPoints)) {
+    // Preview, live mission reloads and "return to overview" must share one
+    // camera calculation. The legacy setViewport path can include long route
+    // tails and make the actual delivery area appear as a tiny island after a
+    // refresh, even though the same task looked correct in planning mode.
+    if (!flyToMissionOverview(viewportPoints)) {
       engine.map.setHeading(OVERVIEW.heading)
       engine.map.setPitch(OVERVIEW.pitch)
       engine.map.setViewport(viewportPoints, missionViewportOptions())
@@ -1583,10 +1601,7 @@ function flyToMissionOverview(points = currentMissionViewportPoints, duration = 
   })
   return true
 }
-function leaveFollow() {
-  followingId.value = ''
-  followZoomScale = 1
-  emit('select', '')
+function showMissionOverview() {
   if (!flyToMissionOverview()) {
     engine?.map.flyTo(OVERVIEW.center, {
       heading: OVERVIEW.heading,
@@ -1595,6 +1610,13 @@ function leaveFollow() {
       duration: 850
     })
   }
+}
+function leaveFollow() {
+  const contextWillRestoreOverview = Boolean(props.selectedId)
+  followingId.value = ''
+  followZoomScale = 1
+  emit('select', '')
+  if (!contextWillRestoreOverview) showMissionOverview()
 }
 function onMapPointerDown(event) {
   if (event.button !== undefined && event.button !== 0) return
@@ -1651,10 +1673,15 @@ function onFollowWheel(event) {
 function onKeydown(event) { if (event.key === 'Escape' && followingId.value) leaveFollow() }
 watch([() => props.devices, () => props.mission, () => props.selectedId, () => props.selectedAirspaceId, () => props.tutorialRedConflictLocked, layers, replayPercent], updateRoutes, { deep: true })
 watch(() => props.modelAssignments, () => { refreshAssignedModels() }, { deep: true })
-watch(() => props.mission?.taskId || props.mission?.scenarioTemplateId || props.mission?.simulationId, () => { fitted = false; updateRoutes() })
+watch(() => props.mission?.taskId || props.mission?.scenarioTemplateId || props.mission?.simulationId, () => {
+  fitted = false
+  conflictAttentionStartedAt.clear()
+  viewedConflictKeys.clear()
+  updateRoutes()
+})
 watch(followingId, deviceId => emit('follow-change', String(deviceId || '')), { immediate: true })
 watch(() => props.selectedId, (deviceId) => {
-  if (!deviceId) { followingId.value = ''; followZoomScale = 1; return }
+  if (!deviceId) { followingId.value = ''; followZoomScale = 1; showMissionOverview(); return }
   if (props.devices.some(item => item.deviceId === deviceId)) {
     if (followingId.value !== deviceId) { followMode.value = 'rear'; followZoomScale = 1 }
     followingId.value = deviceId
@@ -1696,6 +1723,7 @@ onUnmounted(() => {
   glowTexture?.dispose(); glowTexture = null
   engine?.dispose(); engine = null; mapView = null; missionPointLayer = null; missionPointSignature = ''; rewardPopupLayer = null; trafficLightLayer = null; trafficLightStructureSignature = ''
   airspaceLabelLayer = null; conflictLabelLayer = null; airspaceStructureSignature = ''; airspaceLabelSignature = ''; conflictLabelSignature = ''
+  conflictAttentionStartedAt.clear(); viewedConflictKeys.clear()
   liveTrafficLights = []; trafficLightRenderedStateSignature = ''; trafficLightRenderedNode = null
   modelTemplates?.clear(); modelTemplateLoads.clear(); modelTemplates = null
   coinTaskKey = ''; coinSnapshotInitialized = false; knownCollectedPointIds = new Set()
@@ -1725,8 +1753,11 @@ onUnmounted(() => {
 .map-canvas :deep(.airspace-marker){--airspace:#ff496b;display:grid;gap:2px;min-width:84px;padding:5px 8px;border:1px solid color-mix(in srgb,var(--airspace),transparent 35%);border-radius:2px;color:#f8fbff;text-align:left;background:rgba(4,13,24,.82);box-shadow:0 0 15px color-mix(in srgb,var(--airspace),transparent 75%);backdrop-filter:blur(5px);cursor:pointer;pointer-events:auto;transform:translateY(-4px)}
 .map-canvas :deep(.airspace-marker b){color:var(--airspace);font:700 10px/1.1 "Arial Narrow",sans-serif;letter-spacing:.09em}.map-canvas :deep(.airspace-marker span){color:#a9bac7;font:8px/1.1 sans-serif;letter-spacing:.05em}.map-canvas :deep(.airspace-marker.is-temporary_no_fly){--airspace:#ff8a47}.map-canvas :deep(.airspace-marker.is-risk_airspace){--airspace:#ffd166}.map-canvas :deep(.airspace-marker.is-altitude_restricted),.map-canvas :deep(.airspace-marker.is-altitude_corridor){--airspace:#9a72ff}.map-canvas :deep(.airspace-marker.threat-imminent),.map-canvas :deep(.airspace-marker.threat-violation){animation:airspace-alert .85s ease-in-out infinite alternate}
 .map-canvas :deep(.airspace-marker.is-planning){border-width:2px;background:rgba(19,8,18,.94);box-shadow:0 0 22px color-mix(in srgb,var(--airspace),transparent 58%)}.map-canvas :deep(.airspace-marker.is-planning span){color:#f1dce3;font-weight:650}
-.map-canvas :deep(.airspace-conflict-marker){display:grid;gap:2px;padding:6px 9px;border:1px solid #ff4768;border-radius:2px;color:#fff;text-align:left;background:rgba(47,5,17,.9);box-shadow:0 0 22px rgba(255,38,77,.36);cursor:pointer;pointer-events:auto}.map-canvas :deep(.airspace-conflict-marker b){color:#ff7890;font:800 9px/1 sans-serif;letter-spacing:.08em}.map-canvas :deep(.airspace-conflict-marker span){font:700 10px/1.1 "Arial Narrow",sans-serif}.map-canvas :deep(.airspace-conflict-marker.threat-imminent),.map-canvas :deep(.airspace-conflict-marker.threat-violation){animation:airspace-alert .7s ease-in-out infinite alternate}
+.map-canvas :deep(.airspace-conflict-marker){display:grid;gap:3px;min-width:132px;padding:8px 10px 7px;border:1px solid #ff4768;border-radius:3px;color:#fff;text-align:left;background:linear-gradient(135deg,rgba(62,7,23,.96),rgba(35,5,15,.93));box-shadow:0 0 22px rgba(255,38,77,.36);cursor:pointer;pointer-events:auto;transform-origin:50% 100%;transition:border-color var(--motion-fast),box-shadow var(--motion-fast),filter var(--motion-fast),transform var(--motion-fast)}.map-canvas :deep(.airspace-conflict-marker b){color:#ff8ca1;font:800 10px/1 sans-serif;letter-spacing:.08em}.map-canvas :deep(.airspace-conflict-marker span){font:700 11px/1.15 "Arial Narrow",sans-serif}.map-canvas :deep(.airspace-conflict-marker small){padding-top:3px;border-top:1px solid rgba(255,139,161,.22);color:#ffd1da;font:700 9px/1.1 sans-serif;letter-spacing:.04em}.map-canvas :deep(.airspace-conflict-marker:hover),.map-canvas :deep(.airspace-conflict-marker:focus-visible){border-color:#ff9eb0;filter:brightness(1.12);box-shadow:0 0 0 2px rgba(255,110,139,.18),0 0 30px rgba(255,38,77,.54);outline:none;transform:translateY(-2px) scale(1.035)}.map-canvas :deep(.airspace-conflict-marker.is-click-inviting:not(.is-viewed)){animation:conflict-card-invite 1.2s ease-in-out 3}.map-canvas :deep(.airspace-conflict-marker.tutorial-target-active){animation:tutorial-conflict-invite .9s ease-in-out 3,tutorial-conflict-breathe 2.4s ease-in-out 2.7s infinite;box-shadow:0 0 0 1px rgba(255,138,166,.32),0 0 28px rgba(255,38,91,.66)}
 @keyframes airspace-alert{to{box-shadow:0 0 28px color-mix(in srgb,var(--airspace),transparent 32%);transform:translateY(-4px) scale(1.05)}}
+@keyframes conflict-card-invite{0%,100%{filter:brightness(1);transform:scale(1)}48%{filter:brightness(1.16);box-shadow:0 0 0 3px rgba(255,89,121,.14),0 0 32px rgba(255,38,77,.62);transform:scale(1.045)}}
+@keyframes tutorial-conflict-invite{0%,100%{filter:brightness(1);transform:scale(1)}50%{filter:brightness(1.18);transform:scale(1.06)}}
+@keyframes tutorial-conflict-breathe{0%,100%{filter:brightness(1);transform:scale(1)}50%{filter:brightness(1.08);transform:scale(1.025)}}
 .map-status,.map-error { position:absolute; inset:0; z-index:30; display:grid; place-content:center; gap:8px; padding:30px; text-align:center; background:#071326; }
 .map-status strong { font-size:18px; letter-spacing:2px; }.map-status small{color:#4d8fb2;letter-spacing:2px}.map-error{color:#ff8799}
 .layer-switches { position:absolute; z-index:12; top:90px; left:230px; display:flex; gap:9px; padding:6px 9px; border:1px solid rgba(66,178,214,.24); border-radius:999px; background:rgba(5,20,38,.78); font-size:10px; backdrop-filter:blur(7px); }
@@ -1734,11 +1765,12 @@ onUnmounted(() => {
 .traffic-status { position:absolute; z-index:12; top:126px; left:230px; padding:5px 9px; border:1px solid rgba(74,191,220,.35); border-radius:999px; color:#a8dcea; background:rgba(4,21,35,.82); font-size:10px; backdrop-filter:blur(7px); }
 .traffic-status.is-ready { border-color:rgba(57,245,154,.5); color:#8fffc6; }.traffic-status.is-disabled,.traffic-status.is-degraded{border-color:rgba(255,83,104,.52);color:#ff8e9d}.traffic-status.is-empty{color:#9dafb9}
 .planning-airspace-status{position:absolute;z-index:13;top:88px;left:50%;display:flex;align-items:center;gap:9px;min-width:176px;box-sizing:border-box;padding:7px 12px;border:1px solid rgba(255,72,101,.68);border-radius:3px;color:#ffe8ec;background:linear-gradient(90deg,rgba(63,8,25,.94),rgba(19,10,25,.9));box-shadow:0 0 26px rgba(255,50,86,.2);backdrop-filter:blur(8px);pointer-events:none;transform:translateX(-50%)}.planning-airspace-status>i{width:8px;height:8px;border:1px solid #ff9aaa;border-radius:50%;background:#ff3f64;box-shadow:0 0 12px #ff3f64;animation:planning-airspace-pulse 1.25s ease-in-out infinite}.planning-airspace-status>span{display:grid;gap:2px}.planning-airspace-status strong{font-size:10px;letter-spacing:.08em}.planning-airspace-status small{color:#c9aab3;font-size:8px}.planning-airspace-status.is-hidden{opacity:.58;filter:saturate(.35)}
-.map-legend { position:absolute; z-index:13; right:18px; bottom:84px; display:grid; grid-template-columns:repeat(2,auto); gap:7px 14px; padding:10px 12px; border:1px solid rgba(66,178,214,.28); border-radius:6px; color:#789aaa; background:rgba(3,14,23,.92); box-shadow:0 14px 35px rgba(0,0,0,.3); font-size:9px; }
+.map-legend { position:absolute; z-index:13; right:24px; bottom:104px; display:grid; grid-template-columns:repeat(2,auto); gap:7px 14px; padding:10px 12px; border:1px solid rgba(66,178,214,.28); border-radius:6px; color:#789aaa; background:rgba(3,14,23,.92); box-shadow:0 14px 35px rgba(0,0,0,.3); font-size:9px; }
 .map-legend i { display:inline-block; width:22px; margin-right:5px; border-top:2px dashed currentColor; vertical-align:middle; }.map-legend .ground-plan{color:#46dff2}.map-legend .ground-actual{color:#37f3cf;border-top-style:solid}.map-legend .air-plan{color:#a989ff}.map-legend .air-actual{color:#ef69ff;border-top-style:solid}.map-legend .no-fly{height:7px;border:1px solid #ff405f;background:rgba(255,64,95,.3)}.map-legend .reward-coin{width:9px;height:9px;border:1px solid #fff0a2;border-radius:50%;background:#e9a928;box-shadow:0 0 8px rgba(255,213,72,.65)}.map-legend .reward-diamond{width:9px;height:9px;border:1px solid #ffc3eb;background:#ff3eb5;box-shadow:0 0 11px rgba(255,55,183,.92);transform:rotate(45deg)}
+@media(max-width:700px){.map-legend{right:14px;bottom:88px}}
 .follow-controls { position:absolute; z-index:14; top:88px; left:50%; display:flex; align-items:center; gap:5px; padding:4px 5px 4px 10px; border:1px solid rgba(0,204,232,.38); border-radius:999px; background:rgba(4,23,43,.84); backdrop-filter:blur(8px); transform:translateX(-50%); }
 .follow-controls span { max-width:145px; overflow:hidden; color:#8ec9dc; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }.follow-controls button{padding:5px 9px;border:1px solid rgba(73,166,195,.34);border-radius:999px;color:#9cc7d8;background:rgba(10,48,70,.64);font-size:11px;cursor:pointer}.follow-controls button.active{border-color:var(--signal-primary,#35e3f4);color:#efffff;background:rgba(22,94,119,.82)}.follow-controls .overview-button{border-color:rgba(255,209,102,.5);color:#fff2c2;background:rgba(67,49,17,.68)}.follow-controls kbd{margin-left:3px;color:#94aeb9;font:9px monospace}
 @media(max-width:1300px){.layer-switches,.traffic-status{left:215px}.follow-controls{left:46%;}}
 @keyframes planning-airspace-pulse{50%{opacity:.35;transform:scale(.72)}}
-@media(prefers-reduced-motion:reduce){.mission-map *{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+@media(prefers-reduced-motion:reduce){.mission-map *{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}.map-canvas :deep(.airspace-conflict-marker.tutorial-target-active){animation:none;filter:brightness(1.18);box-shadow:0 0 0 2px rgba(255,138,166,.62),0 0 24px rgba(255,38,91,.55)}}
 </style>

@@ -128,7 +128,7 @@ test('static active airspace is visible at simulation zero while dynamic airspac
   assert.equal(resolveAirspaceActivation({ state: 'ACTIVE', dynamic: true, activationRatio: 0 }), 0)
   assert.equal(resolveAirspaceActivation({ state: 'SCHEDULED', dynamic: true, activationRatio: 1 }), 0)
   assert.equal(resolveAirspaceActivation({ state: 'ACTIVATING', dynamic: true, activationRatio: 0 }), .05)
-  assert.match(missionMap, /props\.planningPreview \|\| !flyToMissionOverview\(viewportPoints\)/)
+  assert.match(missionMap, /if \(!flyToMissionOverview\(viewportPoints\)\)/)
   assert.match(missionMap, /AIRSPACE_LABEL_ALTITUDE_METERS = 12/)
   assert.match(missionMap, /CONFLICT_LABEL_ALTITUDE_METERS = 18/)
   assert.match(missionMap, /cycleAnchorSimulationMs/)
@@ -239,6 +239,9 @@ test('airspace action confirmation stays in its panel and does not cover follow 
   assert.match(airspaceInspector, /volume\.selectedAction/)
   assert.doesNotMatch(missionRuntime, /notice\.value = result\.action\?\.message/)
   assert.match(spatialScreen, /\.system-notice[^}]*top:132px/)
+  assert.match(spatialScreen, /\.system-notice[^}]*font-size:clamp\(\.875rem/)
+  assert.match(spatialScreen, /\.system-notice::before[^}]*content:"!"/)
+  assert.match(spatialScreen, /@keyframes system-notice-enter/)
   assert.match(spatialScreen, /\.system-notice[^}]*pointer-events:none/)
 })
 

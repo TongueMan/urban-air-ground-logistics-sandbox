@@ -16,6 +16,7 @@ export function useFleetRuntime() {
   const error = ref('')
   const notice = ref('')
   const guidance = ref(null)
+  const recoveryAssetId = ref('')
   const category = ref('GROUND')
   const selectedTypeId = ref('')
   const selectedAssetId = ref('')
@@ -106,6 +107,7 @@ export function useFleetRuntime() {
     sellingAssetId.value = ''
     notice.value = ''
     guidance.value = null
+    recoveryAssetId.value = ''
   }
 
   function showGuidance(value) {
@@ -132,6 +134,35 @@ export function useFleetRuntime() {
     confirmingTypeId.value = ''
     sellingAssetId.value = ''
     notice.value = ''
+  }
+
+  async function openForRecovery(recovery = {}) {
+    recoveryAssetId.value = ''
+    category.value = recovery.category === 'AIR' ? 'AIR' : 'GROUND'
+    await open()
+    const requestedAssetId = String(recovery.assetId || '')
+    const matchingAsset = assets.value.find(asset => String(asset.assetId) === requestedAssetId)
+      || assets.value.find(asset => {
+        const type = catalog.value.find(item => item.typeId === asset.typeId)
+        return type?.category === category.value && asset.status === 'DEPLOYED'
+      })
+    if (matchingAsset) {
+      selectType(matchingAsset.typeId)
+      selectedAssetId.value = matchingAsset.assetId
+      recoveryAssetId.value = matchingAsset.status === 'GARAGED' ? '' : matchingAsset.assetId
+    }
+    showGuidance({
+      source: 'BATTERY_RECOVERY',
+      badge: '续航恢复',
+      title: matchingAsset?.status === 'GARAGED' ? '设备已经返回车库' : '请召回没电设备',
+      message: matchingAsset?.status === 'GARAGED'
+        ? '设备已经进入车库并开始自动充电。'
+        : `${recovery.deviceName || '任务设备'}无法继续运输，需要先召回车库。`,
+      action: matchingAsset?.status === 'GARAGED'
+        ? '电量恢复后重新出站，即可开始下一次配送。'
+        : '在下方设备实例中点击高亮的“召回”，设备入库后会自动充电。'
+    })
+    return matchingAsset || null
   }
 
   async function purchase(typeId = selectedTypeId.value) {
@@ -169,8 +200,16 @@ export function useFleetRuntime() {
       const result = await changeFleetAssetStatus(asset.assetId, {
         commandId: commandId('STATE'), targetStatus
       })
+      const recoveryRecall = targetStatus === 'GARAGED' && recoveryAssetId.value === asset.assetId
       replaceSnapshot(result.fleet)
-      guidance.value = null
+      guidance.value = recoveryRecall ? {
+        source: 'BATTERY_RECOVERY',
+        badge: '正在充电',
+        title: '召回成功',
+        message: '设备已进入车库并开始自动充电。',
+        action: '电量恢复后重新出站，即可继续执行配送任务。'
+      } : null
+      if (recoveryRecall) recoveryAssetId.value = ''
       selectedAssetId.value = asset.assetId
       const autoRecalledCount = Array.isArray(result.autoRecalledAssetIds) ? result.autoRecalledAssetIds.length : 0
       notice.value = targetStatus === 'DEPLOYED'
@@ -211,9 +250,9 @@ export function useFleetRuntime() {
 
   return {
     snapshot, company, assets, catalog, counts, activeDeployments, activeSceneAssetIds, selectedType, selectedInstances,
-    isOpen, loading, initialized, busyKey, error, notice, guidance, category, selectedTypeId,
+    isOpen, loading, initialized, busyKey, error, notice, guidance, recoveryAssetId, category, selectedTypeId,
     selectedAssetId, devMode, confirmingTypeId, sellingAssetId,
-    initialize, open, close, showGuidance, dismissGuidance, selectFirstForCategory, selectType, purchase, setAssetStatus, sell,
+    initialize, open, openForRecovery, close, showGuidance, dismissGuidance, selectFirstForCategory, selectType, purchase, setAssetStatus, sell,
     mergeMissionEconomy
   }
 }

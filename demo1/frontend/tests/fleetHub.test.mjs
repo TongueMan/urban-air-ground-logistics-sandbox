@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { MODEL_ASSETS } from '../src/config/modelAssets.mjs'
+import { batteryRecoveryForMission } from '../src/fleet/batteryRecovery.mjs'
 import { deployedFleetAssignments, effectiveFleetPrice, fleetCounts, fleetSections, formatCny } from '../src/fleet/fleetCatalog.mjs'
 import { instrumentFleetVehicleState } from '../src/fleet/instrumentFleetState.mjs'
 import { batteryTone, chargeRemainingSeconds, projectedBatteryPercent } from '../src/fleet/vehicleGameplay.mjs'
@@ -18,6 +19,31 @@ const catalog = [
   ['smart-city-drone', 'AIR', 'smart-city-drone', 2200000],
   ['vtol-air-taxi', 'AIR', 'vtol-air-taxi', 8800000]
 ].map(([typeId, category, modelAssetId, priceMinor]) => ({ typeId, category, modelAssetId, priceMinor }))
+
+test('battery depletion resolves to an actionable fleet recovery target only after mission stop', () => {
+  assert.equal(batteryRecoveryForMission({ status: 'RUNNING', terminalReason: 'GROUND_BATTERY_DEPLETED' }), null)
+  assert.equal(batteryRecoveryForMission({ status: 'STOPPED', terminalReason: 'USER_STOPPED' }), null)
+
+  assert.deepEqual(batteryRecoveryForMission({
+    status: 'STOPPED',
+    terminalReason: 'GROUND_BATTERY_DEPLETED',
+    groundVehicle: { assetId: 'FLT-GROUND', name: '城市货运三轮车' }
+  }), {
+    code: 'GROUND_BATTERY_DEPLETED',
+    category: 'GROUND',
+    assetId: 'FLT-GROUND',
+    deviceName: '城市货运三轮车',
+    title: '城市货运三轮车电量已耗尽，任务已停止',
+    message: '请前往车队中心召回设备；返回车库后将自动充电。',
+    actionLabel: '前往车队中心'
+  })
+
+  assert.equal(batteryRecoveryForMission({
+    status: 'FAILED',
+    terminalReason: 'AIR_BATTERY_DEPLETED',
+    source: { session: { airAssetId: 'FLT-AIR' } }
+  }).assetId, 'FLT-AIR')
+})
 
 test('fleet catalog points every purchasable type to a registered model', () => {
   assert.equal(catalog.length, 7)
@@ -108,6 +134,8 @@ test('fleet runtime replaces its snapshot from server responses', () => {
   assert.match(runtime, /replaceSnapshot\(result\.fleet\)/)
   assert.match(runtime, /autoRecalledAssetIds/)
   assert.match(runtime, /自动召回/)
+  assert.match(runtime, /openForRecovery/)
+  assert.match(runtime, /recoveryAssetId/)
   assert.match(runtime, /sellFleetAsset/)
   assert.match(runtime, /commandId\('SELL'\)/)
   assert.match(api, /sellFleetAsset/)
@@ -119,6 +147,7 @@ test('fleet runtime replaces its snapshot from server responses', () => {
 
 test('fleet hub confirms full-price sales and prevents deployed asset sales', () => {
   const hub = readFileSync(join(root, 'components', 'fleet', 'FleetHub.vue'), 'utf8')
+  const recoveryBanner = readFileSync(join(root, 'components', 'fleet', 'BatteryRecoveryBanner.vue'), 'utf8')
   assert.match(hub, /确认按原价/)
   assert.match(hub, /selectedType\.priceMinor/)
   assert.match(hub, /售出后，该设备将从当前车队移除/)
@@ -138,7 +167,17 @@ test('fleet hub confirms full-price sales and prevents deployed asset sales', ()
   assert.match(hub, /下一步/)
   assert.match(hub, /runtime\.guidance\.value/)
   assert.match(hub, /runtime\.dismissGuidance/)
+  assert.match(hub, /recovery-target/)
+  assert.match(hub, /data-recovery-action/)
+  assert.match(hub, /recovery-action-pulse/)
+  assert.match(recoveryBanner, /battery-recovery-banner/)
+  assert.match(recoveryBanner, /role="alert"/)
+  assert.match(recoveryBanner, /openForRecovery/)
   assert.match(hub, /地面与空中各限一台出站/)
+  assert.match(hub, /\.tutorial-guidance\{position:absolute/)
+  assert.doesNotMatch(hub, /\.fleet-hub\.has-guidance\{grid-template-rows:/)
+  assert.match(hub, /\.detail-content \{[^}]*grid-template-rows:minmax\(0,1fr\) auto/)
+  assert.match(hub, /class="detail-scroll"[\s\S]*data-tutorial-id="fleet-instances"/)
 })
 
 test('battery colors use the five gameplay bands and charging projects linearly', () => {
@@ -210,6 +249,20 @@ test('running instrument keeps mission telemetry and terminal state waits for a 
   assert.equal(instrumentFleetVehicleState(mission, snapshot, 'AIR'), null)
   snapshot.assets[0].activeRunId = null
   assert.equal(instrumentFleetVehicleState(mission, snapshot, 'AIR').batteryPercent, 100)
+})
+
+test('tutorial preview instrument keeps the virtual battery instead of exposing real fleet charge', () => {
+  const snapshot = {
+    catalog,
+    assets: [{ assetId: 'FLT-A', typeId: 'smart-city-drone', status: 'DEPLOYED', batteryPercent: 41 }]
+  }
+  const mission = {
+    status: 'READY',
+    airVehicle: { assetId: 'FLT-A', batteryPercent: 100 },
+    source: { mission: { resolvedParameters: { tutorialBatteryProtected: true } } }
+  }
+
+  assert.equal(instrumentFleetVehicleState(mission, snapshot, 'AIR'), null)
 })
 
 test('catalog cards remain renderer-free and hub owns one shared viewer', () => {

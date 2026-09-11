@@ -1,6 +1,6 @@
 <template>
   <Transition name="motion-instrument">
-    <aside v-if="volume" class="airspace-inspector" :class="[`rule-${ruleKey}`, `threat-${threatKey}`]" aria-label="空域详情">
+    <aside v-if="volume" class="airspace-inspector" :class="[`rule-${ruleKey}`, `threat-${threatKey}`]" data-tutorial-id="airspace-inspector" aria-label="空域详情">
       <button class="airspace-close" type="button" aria-label="关闭空域详情" @click="runtime.closeAirspace">×</button>
       <span class="airspace-kicker">DIGITAL AIRSPACE / {{ volume.id }}</span>
       <strong>{{ volume.label || ruleLabel }}</strong>

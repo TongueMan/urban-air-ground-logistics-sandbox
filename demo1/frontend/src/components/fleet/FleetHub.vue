@@ -41,19 +41,20 @@
       </div>
       <template v-else>
         <div v-if="runtime.guidance.value" class="tutorial-guidance" role="alert" aria-live="assertive">
-          <span class="guidance-badge">教程 00 引导</span>
+          <span class="guidance-badge">{{ runtime.guidance.value.badge || '教程 00 引导' }}</span>
           <div class="guidance-copy">
             <strong>{{ runtime.guidance.value.title }}</strong>
             <p>{{ runtime.guidance.value.message }}</p>
             <small><b>下一步</b>{{ runtime.guidance.value.action }}</small>
           </div>
-          <button type="button" aria-label="关闭教程跳转提示" @click="runtime.dismissGuidance">知道了</button>
+          <button type="button" aria-label="关闭车队操作提示" @click="runtime.dismissGuidance">知道了</button>
         </div>
         <div class="hub-body">
           <FleetModelViewer :model-asset-id="selectedType?.modelAssetId || ''" :active="true" />
 
           <aside class="asset-detail" aria-live="polite" data-tutorial-id="fleet-detail">
             <div v-if="selectedType" class="detail-content">
+              <div class="detail-scroll">
               <p class="detail-code">{{ categoryLabel(selectedType.category) }} · 车型编号 {{ selectedType.typeId }}</p>
               <h3>{{ selectedType.name }}</h3>
               <p class="english-name">{{ selectedType.englishName }}</p>
@@ -96,11 +97,20 @@
                 <b>{{ runtime.devMode.value ? '开发者价 ¥0' : formatCny(selectedType.priceMinor) }}</b>
               </button>
               <p v-if="insufficientFunds" class="funds-warning">余额不足，还需 {{ formatCny(effectivePrice - runtime.company.value.balanceMinor) }}</p>
+              </div>
 
               <section class="instance-list" aria-label="具体设备实例" data-tutorial-id="fleet-instances">
                 <header><span>设备实例</span><b>{{ selectedInstances.length }} 台</b></header>
                 <div v-if="selectedInstances.length" class="instance-scroll">
-                  <article v-for="asset in selectedInstances" :key="asset.assetId" :class="{ selected: runtime.selectedAssetId.value === asset.assetId }" @click="runtime.selectedAssetId.value = asset.assetId">
+                  <article
+                    v-for="asset in selectedInstances"
+                    :key="asset.assetId"
+                    :class="{
+                      selected: runtime.selectedAssetId.value === asset.assetId,
+                      'recovery-target': runtime.recoveryAssetId.value === asset.assetId
+                    }"
+                    @click="runtime.selectedAssetId.value = asset.assetId"
+                  >
                     <div>
                       <b>{{ compactAssetId(asset.assetId) }}</b>
                       <small>{{ asset.acquisitionSource === 'INITIAL' ? '初始配备' : '采购入库' }}<em v-if="runtime.activeSceneAssetIds.value.has(asset.assetId)">地图使用中</em></small>
@@ -113,6 +123,8 @@
                     <div class="instance-actions">
                       <button
                         type="button"
+                        :class="{ 'recovery-action': runtime.recoveryAssetId.value === asset.assetId }"
+                        :data-recovery-action="runtime.recoveryAssetId.value === asset.assetId ? 'recall' : undefined"
                         :disabled="!!runtime.busyKey.value || !!asset.activeRunId"
                         :title="asset.activeRunId ? '设备正在执行任务，请先结束任务' : ''"
                         @click.stop="runtime.setAssetStatus(asset, asset.status === 'GARAGED' ? 'DEPLOYED' : 'GARAGED')"
@@ -232,7 +244,6 @@ onBeforeUnmount(() => { document.removeEventListener('keydown', onKeydown); if (
 <style scoped>
 .fleet-hub-backdrop { position:absolute; inset:0; z-index:calc(var(--layer-tutorial) + 10); display:grid; place-items:center; padding:3vh 2.5vw; pointer-events:auto; background:rgba(1,6,10,.7); backdrop-filter:brightness(.42) saturate(.68) blur(2px); }
 .fleet-hub { position:relative; width:min(1760px,95vw); height:min(920px,94vh); min-height:620px; display:grid; grid-template-rows:80px minmax(0,1fr) 210px 48px; overflow:hidden; border:1px solid rgba(124,231,238,.38); outline:none; color:var(--text-primary); background:linear-gradient(150deg,rgba(5,19,28,.99),rgba(2,8,14,.99)); box-shadow:0 28px 100px rgba(0,0,0,.62),inset 0 1px 0 rgba(201,249,255,.1); clip-path:polygon(0 0,calc(100% - 22px) 0,100% 22px,100% 100%,22px 100%,0 calc(100% - 22px)); }
-.fleet-hub.has-guidance{grid-template-rows:80px auto minmax(0,1fr) 210px 48px}
 .fleet-hub::before { content:""; position:absolute; z-index:8; left:0; top:0; width:110px; border-top:3px solid var(--signal-primary); pointer-events:none; }
 .hub-header { display:grid; grid-template-columns:minmax(260px,1fr) auto minmax(310px,1fr) 54px; align-items:center; gap:18px; padding:10px 16px 9px 22px; border-bottom:1px solid rgba(154,205,224,.2); background:rgba(6,21,31,.92); }
 .hub-identity span { color:var(--text-secondary); font:12px/1 monospace; letter-spacing:.12em; }
@@ -250,11 +261,12 @@ onBeforeUnmount(() => { document.removeEventListener('keydown', onKeydown); if (
 .close-hub { height:44px; display:grid; grid-template-columns:1fr; place-content:center; border:1px solid rgba(154,205,224,.24); color:var(--text-secondary); background:rgba(3,13,20,.7); font:300 23px/17px sans-serif; }
 .close-hub small { color:var(--text-secondary); font:12px/1 monospace; }
 .close-hub:hover,.close-hub:focus-visible { border-color:var(--signal-critical); color:var(--signal-critical); outline:none; }
-.tutorial-guidance{z-index:7;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:16px;padding:11px 18px;border-bottom:1px solid rgba(255,200,103,.42);color:#fff2cc;background:linear-gradient(90deg,rgba(91,57,11,.98),rgba(42,31,14,.97) 62%,rgba(18,29,31,.96));box-shadow:0 10px 30px rgba(0,0,0,.28)}
+.tutorial-guidance{position:absolute;z-index:12;top:92px;left:18px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:16px;width:min(760px,calc(100% - 430px));box-sizing:border-box;padding:11px 14px;border:1px solid rgba(255,200,103,.48);border-left:3px solid var(--signal-warning);border-radius:3px;color:#fff2cc;background:linear-gradient(90deg,rgba(91,57,11,.97),rgba(42,31,14,.96) 72%,rgba(18,29,31,.94));box-shadow:0 12px 34px rgba(0,0,0,.42),0 0 20px rgba(255,197,111,.09)}
 .guidance-badge{padding:6px 9px;border:1px solid rgba(255,215,137,.55);color:#ffd783;background:rgba(255,185,62,.1);font:750 12px/1 monospace;letter-spacing:.08em;white-space:nowrap}.guidance-copy{min-width:0}.guidance-copy strong{display:block;color:#fff5d9;font-size:15px}.guidance-copy p{margin:3px 0 0;color:#efdcb3;font-size:13px;line-height:1.4}.guidance-copy small{display:block;margin-top:4px;color:#fff1c8;font-size:13px;line-height:1.4}.guidance-copy small b{margin-right:7px;color:#ffc75e}.tutorial-guidance>button{min-height:36px;padding:0 13px;border:1px solid rgba(255,215,137,.38);color:#ffe9b4;background:rgba(7,18,22,.5);font-size:13px;white-space:nowrap}.tutorial-guidance>button:hover,.tutorial-guidance>button:focus-visible{border-color:#ffd783;color:#fff;outline:none}
 .hub-body { min-height:0; display:grid; grid-template-columns:minmax(0,1.75fr) minmax(370px,.78fr); gap:14px; padding:14px 16px 10px; }
 .asset-detail { min-width:0; overflow:hidden; border-left:1px solid rgba(154,205,224,.2); background:linear-gradient(90deg,rgba(9,29,39,.7),rgba(3,13,20,.34)); }
-.detail-content { height:100%; overflow-y:auto; padding:8px 15px 12px 20px; scrollbar-width:thin; scrollbar-color:rgba(124,231,238,.3) transparent; }
+.detail-content { height:100%; min-height:0; display:grid; grid-template-rows:minmax(0,1fr) auto; overflow:hidden; }
+.detail-scroll { min-height:0; overflow-y:auto; padding:8px 15px 10px 20px; scrollbar-width:thin; scrollbar-color:rgba(124,231,238,.3) transparent; }
 .detail-code { margin:0; color:var(--signal-primary); font:12px/1.35 monospace; letter-spacing:.06em; }
 .detail-content h3 { margin:9px 0 3px; font:600 24px/1.2 sans-serif; }
 .english-name { margin:0; color:var(--text-secondary); font:12px/1.35 monospace; text-transform:uppercase; }
@@ -275,19 +287,22 @@ onBeforeUnmount(() => { document.removeEventListener('keydown', onKeydown); if (
 .purchase-confirm { margin-top:10px; padding:11px; border:1px solid rgba(255,197,111,.48); background:rgba(46,31,10,.86); }
 .purchase-confirm p { margin:0 0 10px; color:#ffe8bf; font-size:14px; line-height:1.5; }.purchase-confirm div{display:flex;justify-content:end;gap:8px}.purchase-confirm button{min-height:36px;padding:7px 12px;border:1px solid rgba(255,220,164,.28);color:var(--text-secondary);background:rgba(5,15,21,.7);font-size:14px}.purchase-confirm .primary{border-color:var(--signal-warning);color:#fff0ce}
 .funds-warning { margin:7px 0 0; color:var(--signal-critical); font-size:13px; }
-.instance-list { margin-top:13px; }.instance-list>header{display:flex;justify-content:space-between;padding-bottom:7px;border-bottom:1px solid var(--surface-line);color:var(--text-secondary);font:12px/1.2 monospace;letter-spacing:.06em}
+.instance-list { min-height:0; margin:0; padding:10px 15px 12px 20px; border-top:1px solid rgba(124,231,238,.24); background:linear-gradient(100deg,rgba(5,25,34,.98),rgba(3,14,21,.98)); box-shadow:0 -12px 28px rgba(0,0,0,.3); }.instance-list>header{display:flex;justify-content:space-between;padding-bottom:7px;border-bottom:1px solid var(--surface-line);color:var(--text-secondary);font:12px/1.2 monospace;letter-spacing:.06em}
 .instance-scroll { max-height:132px; overflow-y:auto; }
 .instance-scroll article { display:grid; grid-template-columns:minmax(88px,1fr) 80px auto auto; align-items:center; gap:9px; padding:8px 0; border-bottom:1px solid rgba(154,205,224,.1); cursor:default; }
 .instance-scroll article.selected { background:linear-gradient(90deg,rgba(124,231,238,.08),transparent); }
+.instance-scroll article.recovery-target{margin:3px 0;padding:8px 7px;border:1px solid rgba(255,199,94,.58);background:linear-gradient(90deg,rgba(105,67,8,.38),rgba(255,197,111,.04));box-shadow:0 0 0 1px rgba(255,197,111,.08),0 0 22px rgba(255,184,54,.13);animation:recovery-target-pulse 1.35s ease-in-out infinite}
 .instance-scroll article div { min-width:0; display:grid; gap:3px; }.instance-scroll article div b{overflow:hidden;color:var(--text-secondary);font:12px/1.2 monospace;text-overflow:ellipsis}.instance-scroll article div small{color:var(--text-secondary);font-size:12px}.instance-scroll article div em{margin-left:6px;color:#8fffd0;font-style:normal;font-weight:700}
 .instance-scroll .instance-energy{padding-left:8px;border-left:2px solid var(--battery-color,rgba(154,205,224,.35))}.instance-scroll .instance-energy b{color:var(--battery-color,#b9cbd3)}.instance-scroll .instance-energy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.instance-energy.battery-green{--battery-color:#62ef9b}.instance-energy.battery-yellow{--battery-color:#f2df66}.instance-energy.battery-orange{--battery-color:#ff9f43}.instance-energy.battery-red,.instance-energy.battery-depleted{--battery-color:#ff5f62}
 .instance-scroll article>span { padding:4px 7px; border:1px solid currentColor; font:12px/1 monospace; }.instance-scroll .garaged{color:var(--signal-primary)}.instance-scroll .deployed{color:var(--signal-mint)}
 .instance-actions { display:flex!important; grid-auto-flow:column; gap:6px!important; }
 .instance-scroll button { min-height:34px; padding:6px 9px; border:1px solid var(--surface-line-strong); color:var(--text-secondary); background:rgba(7,25,34,.8); font-size:13px; }
 .instance-scroll button:hover:not(:disabled),.instance-scroll button:focus-visible:not(:disabled){border-color:var(--signal-primary);color:var(--text-primary);outline:none}
+.instance-scroll button.recovery-action{border-color:#ffd06f;color:#2b1b02;background:linear-gradient(135deg,#ffe0a0,#ffc75e);box-shadow:0 0 0 2px rgba(255,199,94,.13),0 0 18px rgba(255,184,54,.25);font-weight:800;animation:recovery-action-pulse 1.1s ease-in-out infinite}
 .instance-scroll .sell-action{border-color:rgba(255,126,94,.46);color:#ffb19d;background:rgba(65,20,14,.46)}
 .instance-scroll .sell-action:hover:not(:disabled),.instance-scroll .sell-action:focus-visible:not(:disabled){border-color:#ff8568;color:#ffe1d9;background:rgba(91,28,18,.7)}
 .instance-scroll button:disabled{cursor:not-allowed;opacity:.46}
+@keyframes recovery-target-pulse{50%{border-color:#ffe2a4;box-shadow:0 0 0 3px rgba(255,197,111,.1),0 0 28px rgba(255,184,54,.25)}}@keyframes recovery-action-pulse{50%{filter:brightness(1.1);transform:scale(1.045)}}
 .sale-confirm{margin-top:9px;padding:10px 11px;border:1px solid rgba(255,126,94,.56);background:linear-gradient(100deg,rgba(72,22,15,.8),rgba(37,16,13,.72))}
 .sale-confirm p{margin:0;color:#ffe0d7;font-size:14px;line-height:1.45}.sale-confirm p b{color:#ffb19d;font-family:monospace}.sale-confirm small{display:block;margin-top:4px;color:var(--text-secondary);font-size:12px;line-height:1.45}.sale-confirm>div{display:flex!important;justify-content:flex-end;gap:8px!important;margin-top:9px}.sale-confirm button{min-height:36px;padding:7px 12px;border:1px solid rgba(255,226,219,.24);color:var(--text-secondary);background:rgba(5,15,21,.72);font-size:14px}.sale-confirm .danger{border-color:#ff8568;color:#ffe3dc;background:rgba(102,30,19,.7)}
 .no-instance { color:var(--text-secondary); font-size:14px; line-height:1.55; }
@@ -299,6 +314,7 @@ onBeforeUnmount(() => { document.removeEventListener('keydown', onKeydown); if (
 .dev-ribbon { position:absolute; z-index:10; right:70px; top:76px; padding:7px 11px; border:1px solid rgba(255,197,111,.66); color:#ffe0a2; background:rgba(61,39,7,.96); font:700 13px/1.2 sans-serif; letter-spacing:.03em; }
 .hub-loading { grid-row:2/5; display:grid; place-content:center; gap:10px; text-align:center; color:var(--text-secondary);font-size:15px }.hub-loading b{color:var(--signal-primary);font:700 16px/1.3 sans-serif;letter-spacing:.08em}.hub-loading.error b{color:var(--signal-critical)}.hub-loading button{justify-self:center}
 @media (max-width:1350px), (max-height:820px) {
-  .fleet-hub-backdrop{padding:1.5vh 1vw}.fleet-hub{width:98vw;height:97vh;min-height:600px;grid-template-rows:72px minmax(0,1fr) 190px 46px}.fleet-hub.has-guidance{grid-template-rows:72px auto minmax(0,1fr) 190px 46px}.hub-header{grid-template-columns:minmax(190px,1fr) auto minmax(245px,1fr) 46px;gap:9px;padding:8px 12px 7px 15px}.hub-identity span{display:none}.hub-identity h2{margin:0;font-size:20px}.hub-identity h2 small{font-size:12px}.category-tabs button{min-width:120px;font-size:14px}.category-tabs button small{font-size:12px}.company-readout{gap:13px}.company-readout small{font-size:12px}.company-readout b{font-size:14px}.close-hub{height:42px}.tutorial-guidance{gap:10px;padding:9px 13px}.guidance-copy p,.guidance-copy small{font-size:12px}.hub-body{grid-template-columns:minmax(0,1.55fr) minmax(330px,.8fr);gap:10px;padding:10px 12px 8px}.detail-content{padding:5px 11px 8px 15px}.detail-code,.english-name{font-size:12px}.detail-content h3{margin-top:6px;font-size:20px}.summary{margin:8px 0;font-size:14px;line-height:1.45}.load-hint{padding:6px 0}.load-hint b{font-size:13px}.rating-grid{gap:7px 13px;margin:8px 0}.rating-grid dt{font-size:13px}.rating-grid i{width:12px;height:4px}.price-block{padding:8px 9px}.price-block strong{font-size:21px}.purchase-button{min-height:40px;margin-top:7px}.instance-list{margin-top:8px}.instance-scroll{max-height:88px}.catalog-deck{gap:12px;padding:9px 12px 10px}.fleet-state-summary{gap:11px;font-size:12px}.fleet-state-summary small{display:none}.operation-message{font-size:12px}.dev-toggle{font-size:13px}.dev-ribbon{right:62px;top:68px;font-size:12px}
+  .fleet-hub-backdrop{padding:1.5vh 1vw}.fleet-hub{width:98vw;height:97vh;min-height:600px;grid-template-rows:72px minmax(0,1fr) 190px 46px}.hub-header{grid-template-columns:minmax(190px,1fr) auto minmax(245px,1fr) 46px;gap:9px;padding:8px 12px 7px 15px}.hub-identity span{display:none}.hub-identity h2{margin:0;font-size:20px}.hub-identity h2 small{font-size:12px}.category-tabs button{min-width:120px;font-size:14px}.category-tabs button small{font-size:12px}.company-readout{gap:13px}.company-readout small{font-size:12px}.company-readout b{font-size:14px}.close-hub{height:42px}.tutorial-guidance{top:82px;left:14px;gap:10px;width:min(720px,calc(100% - 380px));padding:9px 12px}.guidance-copy p,.guidance-copy small{font-size:12px}.hub-body{grid-template-columns:minmax(0,1.55fr) minmax(330px,.8fr);gap:10px;padding:10px 12px 8px}.detail-scroll{padding:5px 11px 7px 15px}.detail-code,.english-name{font-size:12px}.detail-content h3{margin-top:6px;font-size:20px}.summary{margin:8px 0;font-size:14px;line-height:1.45}.load-hint{padding:6px 0}.load-hint b{font-size:13px}.rating-grid{gap:7px 13px;margin:8px 0}.rating-grid dt{font-size:13px}.rating-grid i{width:12px;height:4px}.price-block{padding:8px 9px}.price-block strong{font-size:21px}.purchase-button{min-height:40px;margin-top:7px}.instance-list{padding:8px 11px 9px 15px}.instance-scroll{max-height:88px}.catalog-deck{gap:12px;padding:9px 12px 10px}.fleet-state-summary{gap:11px;font-size:12px}.fleet-state-summary small{display:none}.operation-message{font-size:12px}.dev-toggle{font-size:13px}.dev-ribbon{right:62px;top:68px;font-size:12px}
 }
+@media(prefers-reduced-motion:reduce){.instance-scroll article.recovery-target,.instance-scroll button.recovery-action{animation:none}}
 </style>

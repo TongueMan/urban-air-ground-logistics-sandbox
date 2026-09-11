@@ -24,10 +24,11 @@ function useLocalImage(event) {
 <style scoped>
 .tutorial-character {
   position: absolute;
-  bottom: 82px;
+  bottom: 18px;
   z-index: calc(var(--layer-tutorial) + 1);
-  width: clamp(320px, 26vw, 460px);
-  height: clamp(380px, 56vh, 600px);
+  width: clamp(300px, 24vw, 420px);
+  height: clamp(320px, 52vh, 560px);
+  max-height: calc(100% - 138px);
   margin: 0;
   pointer-events: none;
   filter: brightness(.64) saturate(.72);
@@ -47,10 +48,8 @@ function useLocalImage(event) {
   user-select: none;
 }
 
-.side-left { left: max(36px, calc(50% - 620px)); }
-.side-right { right: max(36px, calc(50% - 620px)); }
-.side-right.is-inspector { right: clamp(352px, 26vw, 510px); }
-
+.side-left { left: max(54px, calc(50% - 570px)); }
+.side-right { right: max(54px, calc(50% - 570px)); }
 .tutorial-character.is-speaking {
   z-index: calc(var(--layer-tutorial) + 2);
   filter: brightness(1) saturate(1);
@@ -65,18 +64,9 @@ function useLocalImage(event) {
 }
 
 .tutorial-character.is-planner {
-  bottom: 82px;
-  width: clamp(280px, 21vw, 370px);
-  height: clamp(360px, 52vh, 550px);
-}
-
-.side-left.is-planner {
-  right: auto;
-  left: clamp(728px, 51vw, 1120px);
-}
-
-.side-right.is-planner {
-  right: clamp(12px, 5vw, 80px);
+  bottom: 18px;
+  width: clamp(260px, 20vw, 350px);
+  height: clamp(300px, 47vh, 500px);
 }
 
 .tutorial-character.is-fleet {
@@ -100,9 +90,9 @@ function useLocalImage(event) {
 
 .tutorial-character.is-action.is-speaking {
   z-index: calc(var(--layer-tutorial) + 2);
-  filter: brightness(1) saturate(1);
-  opacity: 1;
-  transform: translateY(-6px) scale(1);
+  filter: brightness(.55) saturate(.55);
+  opacity: .22;
+  transform: translateY(12px) scale(.97);
 }
 
 @media (max-width: 1450px) {

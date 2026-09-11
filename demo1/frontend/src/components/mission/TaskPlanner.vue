@@ -204,7 +204,10 @@ async function generate() {
     await runtime.generateTask({
       scenarioTemplateId: form.scenarioTemplateId,
       seed: runtime.tutorialGenerationPreset.value?.seed || null,
-      parameters: { ...form.parameters }
+      parameters: {
+        ...form.parameters,
+        tutorialBatteryProtected: Boolean(runtime.tutorialGenerationPreset.value)
+      }
     })
   } catch {
     // Runtime notice remains the single user-facing error; the action stays available for retry.
