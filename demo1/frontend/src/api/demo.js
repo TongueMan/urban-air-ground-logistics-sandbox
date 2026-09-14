@@ -15,7 +15,15 @@ export const createSession = () => request('/api/demo/sessions', { method: 'POST
 export const getScenarioTemplates = () => request('/api/demo/scenario-templates')
 export const generateTaskInstance = payload => request('/api/demo/task-instances', { method: 'POST', body: JSON.stringify(payload) })
 export const getTaskInstance = id => request(`/api/demo/task-instances/${encodeURIComponent(id)}`)
-export const startTaskRun = id => request(`/api/demo/task-instances/${encodeURIComponent(id)}/runs`, { method: 'POST' })
+export const startTaskRun = (id, payload = null) => request(`/api/demo/task-instances/${encodeURIComponent(id)}/runs`, {
+  method: 'POST', ...(payload ? { body: JSON.stringify(payload) } : {})
+})
+export const getTutorials = () => request('/api/demo/tutorials')
+export const syncTutorialProgress = payload => request('/api/demo/tutorials/progress', { method: 'PUT', body: JSON.stringify(payload) })
+export const executeGroundRoutingCommand = (runId, payload) => request(
+  `/api/demo/runs/${encodeURIComponent(runId)}/ground-routing-commands`,
+  { method: 'POST', body: JSON.stringify(payload) }
+)
 export const getTaskHistory = (limit = 20) => request(`/api/demo/task-instances?limit=${encodeURIComponent(limit)}`)
 export const getRun = id => request(`/api/demo/runs/${encodeURIComponent(id)}`)
 export const getRunReplay = id => request(`/api/demo/runs/${encodeURIComponent(id)}/replay`)

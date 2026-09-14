@@ -4,9 +4,9 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { CHARACTER_MANIFEST } from '../src/tutorial/characterManifest.mjs'
-import { calculateConnectorPath, expandRect } from '../src/tutorial/tutorialGeometry.mjs'
-import { canAutoResumeTutorial, canReplayTutorial, createManualAttentionRecord, createProgressRecord, createTutorialState, parseManualAttentionRecord, parseProgressRecord, resolveResumeStep, tutorialChapterUnlocked, tutorialReducer, TUTORIAL_PHASES } from '../src/tutorial/tutorialMachine.mjs'
-import { FLEET_CENTER_STEPS, FLEET_TUTORIAL_CHAPTER, FLEET_TUTORIAL_STORAGE_KEY, PROLOGUE_STEPS, RUN_DEPENDENT_STEPS, TUTORIAL_ATTENTION_STORAGE_KEY, TUTORIAL_CHAPTER, TUTORIAL_STORAGE_KEY } from '../src/tutorial/tutorialScript.mjs'
+import { calculateConnectorPath, expandRect, shouldAvoidDialogueTarget } from '../src/tutorial/tutorialGeometry.mjs'
+import { canAutoResumeTutorial, canReplayTutorial, createManualAttentionRecord, createProgressRecord, createTutorialState, parseManualAttentionRecord, parseProgressRecord, resolveGroundCoopResumeStep, resolveResumeStep, tutorialChapterUnlocked, tutorialReducer, TUTORIAL_PHASES } from '../src/tutorial/tutorialMachine.mjs'
+import { FLEET_CENTER_STEPS, FLEET_TUTORIAL_CHAPTER, FLEET_TUTORIAL_STORAGE_KEY, GROUND_COOP_STEPS, GROUND_COOP_TUTORIAL_CHAPTER, PROLOGUE_STEPS, RUN_DEPENDENT_STEPS, TUTORIAL_ATTENTION_STORAGE_KEY, TUTORIAL_CHAPTER, TUTORIAL_CHAPTERS, TUTORIAL_STORAGE_KEY } from '../src/tutorial/tutorialScript.mjs'
 import { tutorialFleetIssue } from '../src/tutorial/tutorialReadiness.mjs'
 import { buildDialogueSegments } from '../src/tutorial/tutorialText.mjs'
 import { fittedMissionRange, missionBoundsMeters, missionOverviewCamera, missionViewportOptions, plannerAwareViewportPoints } from '../src/utils/missionViewport.mjs'
@@ -156,6 +156,91 @@ test('chapter 01 unlocks only after the prologue is completed or skipped', () =>
   assert.equal(tutorialChapterUnlocked(FLEET_TUTORIAL_CHAPTER, { [TUTORIAL_CHAPTER]: 'skipped' }), true)
 })
 
+test('manual orders all three chapters and chapter 02 follows server evidence', () => {
+  assert.deepEqual(TUTORIAL_CHAPTERS.map(chapter => chapter.index), ['00', '01', '02'])
+  assert.equal(tutorialChapterUnlocked(GROUND_COOP_TUTORIAL_CHAPTER, {}), false)
+  assert.equal(tutorialChapterUnlocked(GROUND_COOP_TUTORIAL_CHAPTER, { [FLEET_TUTORIAL_CHAPTER]: 'completed' }), true)
+  assert.equal(tutorialChapterUnlocked(GROUND_COOP_TUTORIAL_CHAPTER, { [FLEET_TUTORIAL_CHAPTER]: 'skipped' }), true)
+  assert.equal(tutorialChapterUnlocked(GROUND_COOP_TUTORIAL_CHAPTER, { [GROUND_COOP_TUTORIAL_CHAPTER]: 'in_progress' }), true)
+  assert.deepEqual(GROUND_COOP_STEPS.filter(step => step.mode === 'system').map(step => step.id), ['02-W00-PACE', '02-W01', '02-W02', '02-W03'])
+  assert.deepEqual(GROUND_COOP_STEPS.filter(step => step.mode === 'action').map(step => step.id), ['02-A01', '02-A02', '02-A03', '02-A04', '02-A05'])
+  assert.equal(GROUND_COOP_STEPS.find(step => step.id === '02-A04')?.allowSelector, '[data-tutorial-ground-reward]')
+  assert.equal(GROUND_COOP_STEPS.find(step => step.id === '02-D03-PACE')?.targetId, 'mission-pace-vehicle')
+  assert.match(GROUND_COOP_STEPS.find(step => step.id === '02-W00-PACE')?.text || '', /等待合同监管车结束倒计时.*监管车视角/)
+  assert.match(GROUND_COOP_STEPS.find(step => step.id === '02-D03-PACE')?.text || '', /合同监管车已经出发.*时限标尺/)
+  assert.match(GROUND_COOP_STEPS.find(step => step.id === '02-D03-DEADLINE')?.text || '', /监管车抢先到达.*惩罚.*认证不实际结算/)
+  assert.match(GROUND_COOP_STEPS.find(step => step.id === '02-D06')?.text || '', /监管时限内/)
+  assert.deepEqual(TUTORIAL_CHAPTERS.map(chapter => chapter.completeTitle), ['教程 00 完成', '教程 01 完成', '教程 02 完成'])
+  assert.deepEqual(TUTORIAL_CHAPTERS.map(chapter => chapter.completeKicker), ['调度员已就绪', '车队权限已开放', '进阶规划已就绪'])
+  for (const chapter of TUTORIAL_CHAPTERS) {
+    assert.doesNotMatch(`${chapter.completeKicker}${chapter.completeTitle}${chapter.completeSubtitle}`, /[A-Za-z]/)
+  }
+})
+
+test('chapter 02 stays locked until the server grants access and recovers from stale local progress', () => {
+  const engine = readFileSync(join(frontendRoot, 'src', 'tutorial', 'useTutorialEngine.js'), 'utf8')
+  const runtime = readFileSync(join(frontendRoot, 'src', 'mission', 'runtime', 'useLogisticsMissionRuntime.js'), 'utf8')
+  const manual = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialManualEntry.vue'), 'utf8')
+
+  assert.match(engine, /if \(chapterId === GROUND_COOP_TUTORIAL_CHAPTER\) \{\s*return groundTutorialItem\(\)\?\.availability === 'AVAILABLE'/)
+  assert.doesNotMatch(engine, /availability === 'AVAILABLE'\s*\|\|\s*tutorialChapterUnlocked/)
+  assert.match(engine, /await runtime\.refreshTutorialState\(\)[\s\S]{0,220}!chapterAccessGranted\(chapterId\)/)
+  assert.match(engine, /function showLockedGroundTutorial\(\)[\s\S]{0,500}runtime\.closePlanner\(\)[\s\S]{0,500}manualExpanded\.value = true/)
+  assert.match(runtime, /tutorialGenerationPreset\.value\?\.tutorialId === 'TUTORIAL-02-GROUND-COOP'[\s\S]{0,120}refreshTutorialState\(\)/)
+  assert.match(manual, /:disabled="!chapter\.unlocked"/)
+  assert.match(manual, /完成 01 后解锁/)
+  assert.match(manual, /教程 02 尚未解锁。请先完成第 01 章/)
+  assert.match(manual, /selected\.status === 'new' && selected\.unlocked/)
+})
+
+test('chapter 02 pace vehicle explanation points at the waiting vehicle instead of the route HUD', () => {
+  const map = readFileSync(join(frontendRoot, 'src', 'components', 'LogisticsMissionMap.vue'), 'utf8')
+  const bridge = readFileSync(join(frontendRoot, 'src', 'components', 'world', 'MissionWorldBridge.vue'), 'utf8')
+  const engine = readFileSync(join(frontendRoot, 'src', 'tutorial', 'useTutorialEngine.js'), 'utf8')
+  assert.match(map, /node\.dataset\.tutorialId = 'mission-pace-vehicle'/)
+  assert.match(map, /合同监管车 · 等待出发 \$\{departureSeconds\} 秒/)
+  assert.doesNotMatch(map, /ground-routing-hud" data-tutorial-id=/)
+  assert.match(map, /监管车 \$\{Math\.ceil\(pace\.departureCountdownSeconds\)\} 秒后出发/)
+  assert.match(bridge, /:tutorial-camera-target="runtime\.tutorialMapCameraTarget\.value"/)
+  assert.match(map, /function showPaceVehicleCloseup\(\)[\s\S]{0,900}engine\.map\.flyTo\(coordinate/)
+  assert.match(map, /function paceDeviceForMission\(\)[\s\S]{0,300}deviceType: 'pace_vehicle'/)
+  assert.match(map, /updateModelTarget\(paceDevice,[\s\S]{0,500}status === 'RUNNING' \? 'TRANSIT'/)
+  assert.match(engine, /\['02-D03-PACE', '02-D03-DEADLINE'\]\.includes\(stepId\)/)
+  assert.match(engine, /setTutorialMapCameraTarget\(closeup \? 'pace' : ''\)/)
+  assert.match(engine, /stepId === '02-W00-PACE' \? groundPaceDeparted\(\)/)
+})
+
+test('chapter 02 refresh recovery maps each authoritative milestone', () => {
+  const cases = [
+    [{}, '02-A01'],
+    [{ baselineSelected: true }, '02-A03'],
+    [{ taskStarted: true }, '02-W00-PACE'],
+    [{ routeOutsideReward: true }, '02-A05'],
+    [{ returnedToBaseline: true }, '02-W01'],
+    [{ uavTakeoff: true }, '02-W02'],
+    [{ uavRecovered: true }, '02-W03'],
+    [{ missionCompleted: true }, '02-D06']
+  ]
+  for (const [evidence, expected] of cases) assert.equal(resolveGroundCoopResumeStep(evidence), expected)
+  const record = createProgressRecord('02-A04', 'in_progress', 1, GROUND_COOP_TUTORIAL_CHAPTER, { runId: 'RUN-02' })
+  assert.equal(resolveResumeStep(record, { chapterId: GROUND_COOP_TUTORIAL_CHAPTER, activeRunId: 'RUN-02', groundEvidence: { uavTakeoff: true } }), '02-W02')
+  assert.equal(resolveResumeStep(record, { chapterId: GROUND_COOP_TUTORIAL_CHAPTER, activeRunId: 'RUN-OTHER' }), null)
+  assert.equal(resolveResumeStep(record, { chapterId: GROUND_COOP_TUTORIAL_CHAPTER, activeRunId: '' }), '02-D01')
+})
+
+test('chapter 02 owns skip confirmation, 5x observation and settlement suppression', () => {
+  const engine = readFileSync(join(frontendRoot, 'src', 'tutorial', 'useTutorialEngine.js'), 'utf8')
+  const overlay = readFileSync(join(frontendRoot, 'src', 'tutorial', 'TutorialOverlay.vue'), 'utf8')
+  const reactions = readFileSync(join(frontendRoot, 'src', 'components', 'mission', 'MissionReactionOverlay.vue'), 'utf8')
+  assert.match(engine, /syncTutorialStatus\(GROUND_COOP_TUTORIAL_CHAPTER, GROUND_COOP_TUTORIAL_VERSION, 'SKIPPED'\)/)
+  assert.match(engine, /runningGroundTutorial[\s\S]{0,180}runtime\.endMission\(\)/)
+  assert.match(engine, /resumeMission\(5\)/)
+  assert.match(engine, /setTutorialMissionReactionsSuppressed\(true\)/)
+  assert.match(overlay, /确认跳过联合配送资格认证/)
+  assert.match(overlay, /确认跳过并解锁/)
+  assert.match(reactions, /!runtime\.tutorialMissionReactionsSuppressed\?\.value && isLiveMissionCompletion/)
+})
+
 test('manual attention acknowledgement is versioned and survives refresh safely', () => {
   assert.equal(TUTORIAL_ATTENTION_STORAGE_KEY, 'skyfleet.tutorial.manual-attention.v1')
   const record = createManualAttentionRecord(789)
@@ -170,6 +255,12 @@ test('spotlight expansion clamps to the viewport', () => {
   assert.deepEqual(expandRect({ left: 4, top: 5, width: 20, height: 10 }, 12, { width: 100, height: 80 }), {
     left: 0, top: 0, right: 36, bottom: 27, width: 36, height: 27
   })
+})
+
+test('dialogue avoidance protects compact targets without oscillating on full-map highlights', () => {
+  const dialogue = { left: 200, top: 560, width: 900, height: 150 }
+  assert.equal(shouldAvoidDialogueTarget({ left: 20, top: 620, width: 240, height: 80 }, dialogue, { width: 1366, height: 768 }), true)
+  assert.equal(shouldAvoidDialogueTarget({ left: 0, top: 0, width: 1366, height: 768 }, dialogue, { width: 1366, height: 768 }), false)
 })
 
 test('mission viewport uses the tighter bounded range and planner-safe west padding', () => {

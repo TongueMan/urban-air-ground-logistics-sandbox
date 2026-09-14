@@ -96,3 +96,15 @@ test('merges a rewind checkpoint without disturbing live route or device state',
   assert.equal(merged.mission.routes, previous.mission.routes)
   assert.equal(merged.devices, previous.devices)
 })
+
+test('merges authoritative advanced ground route and pace deltas', () => {
+  const previous = { revision: 12, session: { id: 'R1' }, mission: { progress: 20 }, devices: [] }
+  const routed = mergeDemoDelta(previous, 'ground-route-delta', {
+    revision: 13, groundRouting: { routeVersion: 3, activeTemporaryTarget: { targetId: 'G1' } }
+  })
+  assert.equal(routed.mission.groundRouting.routeVersion, 3)
+  const paced = mergeDemoDelta(routed, 'pace-vehicle-delta', {
+    revision: 14, paceVehicle: { status: 'RUNNING', distanceDeltaMeters: 42 }
+  })
+  assert.equal(paced.mission.paceVehicle.distanceDeltaMeters, 42)
+})

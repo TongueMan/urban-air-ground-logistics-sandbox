@@ -29,6 +29,9 @@
       </div>
       <p>{{ selected.description }}</p>
       <p v-if="!ready" class="manual-note">任务状态正在同步，手册很快就绪。</p>
+      <p v-else-if="!selected.unlocked" class="manual-note" role="status">
+        教程 02 尚未解锁。请先完成第 01 章“认识你的车队”。
+      </p>
       <p v-else-if="!replayAllowed" class="manual-note">当前任务结束后可重新体验。</p>
       <p v-if="error" class="manual-error" role="alert">{{ error }}</p>
       <div class="manual-actions">
@@ -39,10 +42,10 @@
           :disabled="!ready || !replayAllowed || preparing || !selected.unlocked"
           @click="$emit('start', selected.id)"
         >
-          {{ preparing ? '正在准备章节…' : startLabel(selected) }}
+          {{ preparing ? '正在准备章节…' : selected.unlocked ? startLabel(selected) : '尚未解锁' }}
         </button>
         <button
-          v-if="selected.status === 'new'"
+          v-if="selected.status === 'new' && selected.unlocked"
           type="button"
           class="manual-secondary"
           data-tutorial-control
@@ -70,7 +73,7 @@ defineEmits(['select', 'start', 'skip', 'close'])
 const selected = computed(() => props.chapters.find(chapter => chapter.id === props.selectedChapterId) || props.chapters[0])
 
 function statusLabel(chapter) {
-  if (!chapter.unlocked) return 'LOCKED'
+  if (!chapter.unlocked) return chapter.index === '02' ? '完成 01 后解锁' : 'LOCKED'
   return ({ new: 'NEW', in_progress: 'IN PROGRESS', completed: 'COMPLETE', skipped: 'SKIPPED' })[chapter.status] || 'NEW'
 }
 

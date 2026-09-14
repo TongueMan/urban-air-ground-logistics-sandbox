@@ -7,6 +7,10 @@ export const TUTORIAL_ATTENTION_STORAGE_KEY = 'skyfleet.tutorial.manual-attentio
 export const FLEET_TUTORIAL_CHAPTER = 'fleet-center'
 export const FLEET_TUTORIAL_STORAGE_KEY = 'skyfleet.tutorial.fleet-center.v1'
 export const PROLOGUE_TUTORIAL_SEED = '1204'
+export const GROUND_COOP_TUTORIAL_CHAPTER = 'TUTORIAL-02-GROUND-COOP'
+export const GROUND_COOP_TUTORIAL_VERSION = '1.0'
+export const GROUND_COOP_TUTORIAL_STORAGE_KEY = 'skyfleet.tutorial.ground-coop.v1'
+export const GROUND_COOP_TUTORIAL_SEED = '2026091202'
 
 export const PROLOGUE_STEPS = Object.freeze([
   { id: 'D01', mode: 'dialogue', speaker: 'anan', expression: 'greeting', text: '欢迎来到合肥城市空地协同物流运营中心。城市订单持续涌入，地面道路与低空航线必须协同，配送才能准时完成。', highlights: [{ text: '城市空地协同物流运营中心', tone: 'cyan' }, { text: '地面道路与低空航线', tone: 'mint' }], advance: 'dialogue' },
@@ -60,10 +64,35 @@ export const FLEET_CENTER_STEPS = Object.freeze([
   { id: 'F01-D11', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '车队中心的基本控制已经讲完。界面会继续留着，你可以自由查看车型和资产。', highlights: [{ text: '自由查看', tone: 'mint' }], advance: 'dialogue' }
 ])
 
+export const GROUND_COOP_STEPS = Object.freeze([
+  { id: '02-D01', mode: 'dialogue', speaker: 'anan', expression: 'greeting', text: '欢迎参加联合配送资格认证。今天要学的不是沿线行驶，而是在计划变化后重新组织车与无人机。', highlights: [{ text: '联合配送资格认证', tone: 'mint' }, { text: '重新组织车与无人机', tone: 'cyan' }], advance: 'dialogue' },
+  { id: '02-D02', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: '本次使用固定教学设备，不计收益或损失。考核基线选择、临时绕行、返回基线和空地会合。', highlights: [{ text: '不计收益或损失', tone: 'amber' }, { text: '基线选择、临时绕行、返回基线和空地会合', tone: 'cyan' }], advance: 'dialogue' },
+  { id: '02-A01', mode: 'action', speaker: 'anan', expression: 'guide', text: '点击“生成认证路线”，载入本次固定种子的教学任务。', highlights: [{ text: '生成认证路线', tone: 'mint' }, { text: '固定种子', tone: 'cyan' }], targetId: 'generate-mission', spotlight: true, advance: 'condition', completionCondition: 'ground-task-generated' },
+  { id: '02-D03', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: 'A、B、C 是三条不同的执行基线。距离最短，不等于所有临时目标都顺路；先选一条，运行中再判断偏离成本。', highlights: [{ text: 'A、B、C', tone: 'cyan' }, { text: '距离最短，不等于所有临时目标都顺路', tone: 'amber' }], targetId: 'mission-route-candidates', spotlight: true, advance: 'dialogue' },
+  { id: '02-A02', mode: 'action', speaker: 'anan', expression: 'guide', text: '从 A、B、C 中自由选择任意一条执行基线。', highlights: [{ text: '任意一条执行基线', tone: 'mint' }], targetId: 'mission-route-candidates', spotlight: true, advance: 'condition', completionCondition: 'ground-baseline-selected' },
+  { id: '02-A03', mode: 'action', speaker: 'anan', expression: 'guide', text: '点击“开始配送”。任务启动后会立即暂停，给你留出判断临时目标的时间。', highlights: [{ text: '开始配送', tone: 'mint' }, { text: '立即暂停', tone: 'amber' }], targetId: 'start-mission', spotlight: true, advance: 'condition', completionCondition: 'ground-task-started-and-paused' },
+  { id: '02-W00-PACE', mode: 'system', speaker: 'cheng', expression: 'analysis', text: '恢复 5×，等待合同监管车结束倒计时。它真正出发时，系统会立即暂停并切换到监管车视角。', highlights: [{ text: '等待合同监管车结束倒计时', tone: 'amber' }, { text: '监管车视角', tone: 'cyan' }], advance: 'condition', completionCondition: 'ground-pace-departed' },
+  { id: '02-D03-PACE', mode: 'dialogue', speaker: 'cheng', expression: 'analysis', text: '注意，合同监管车已经出发。它会沿选定基线驶向同一终点，不参与配送，只作为本次任务的时限标尺。', highlights: [{ text: '合同监管车已经出发', tone: 'amber' }, { text: '时限标尺', tone: 'mint' }], targetId: 'mission-pace-vehicle', spotlight: true, advance: 'dialogue' },
+  { id: '02-D03-DEADLINE', mode: 'dialogue', speaker: 'anan', expression: 'guide', text: '你的车辆需要先完成配送并抵达终点。若让监管车抢先到达，正式任务中会影响任务评价，并可能触发惩罚。这次认证不实际结算，但规则照常演示。', highlights: [{ text: '先完成配送并抵达终点', tone: 'mint' }, { text: '监管车抢先到达', tone: 'amber' }, { text: '认证不实际结算', tone: 'cyan' }], targetId: 'mission-pace-vehicle', spotlight: true, advance: 'dialogue' },
+  { id: '02-D04', mode: 'dialogue', speaker: 'anan', expression: 'default', text: '地图上有几处地面奖励。找一个不在当前基线上的目标，让车辆真正改一次道。', highlights: [{ text: '不在当前基线上的目标', tone: 'amber' }, { text: '真正改一次道', tone: 'mint' }], targetId: 'mission-map-interaction', spotlight: true, advance: 'dialogue' },
+  { id: '02-A04', mode: 'action', speaker: 'anan', expression: 'guide', text: '在高亮地图区域选择一处地面奖励。系统不会标出答案；若它就在当前基线上，可以继续重试。', highlights: [{ text: '地面奖励', tone: 'cyan' }, { text: '不会标出答案', tone: 'amber' }, { text: '继续重试', tone: 'mint' }], targetId: 'mission-map-interaction', spotlight: true, allowSelector: '[data-tutorial-ground-reward]', advance: 'condition', completionCondition: 'ground-route-outside-reward' },
+  { id: '02-D05', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '调度命令已接受。基线不是枷锁，它的意义是让你在偏离之后仍知道该回到哪里。', highlights: [{ text: '基线不是枷锁', tone: 'cyan' }, { text: '回到哪里', tone: 'mint' }], advance: 'dialogue' },
+  { id: '02-A05', mode: 'action', speaker: 'anan', expression: 'guide', text: '点击“返回计划路线”，让车辆结束临时绕行并重新追踪基线。', highlights: [{ text: '返回计划路线', tone: 'mint' }, { text: '重新追踪基线', tone: 'cyan' }], targetId: 'return-ground-baseline', spotlight: true, advance: 'condition', completionCondition: 'ground-returned-to-baseline' },
+  { id: '02-W01', mode: 'system', speaker: 'anan', expression: 'guide', text: '已切换为 5×。观察车辆与无人机编组，检测到无人机离舱起飞后会自动暂停。', highlights: [{ text: '5×', tone: 'cyan' }, { text: '离舱起飞', tone: 'mint' }], advance: 'condition', completionCondition: 'ground-uav-takeoff' },
+  { id: '02-D06-TAKEOFF', mode: 'dialogue', speaker: 'anan', expression: 'greeting', text: '看，无人机已经从车辆离舱。它会独立完成空中配送，但之后仍要回到移动中的车辆。', highlights: [{ text: '从车辆离舱', tone: 'mint' }, { text: '回到移动中的车辆', tone: 'cyan' }], advance: 'dialogue' },
+  { id: '02-W02', mode: 'system', speaker: 'cheng', expression: 'analysis', text: '恢复 5×，继续观察空地会合。无人机被车辆回收时会再次暂停。', highlights: [{ text: '空地会合', tone: 'cyan' }, { text: '再次暂停', tone: 'amber' }], advance: 'condition', completionCondition: 'ground-uav-recovered' },
+  { id: '02-D06-RECOVERY', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '回收完成。刚才的临时绕行没有破坏会合约束，车辆和无人机仍在正确的时间与位置重新编组。', highlights: [{ text: '没有破坏会合约束', tone: 'mint' }, { text: '重新编组', tone: 'cyan' }], advance: 'dialogue' },
+  { id: '02-W03', mode: 'system', speaker: 'anan', expression: 'guide', text: '恢复 5×并完成剩余配送。系统正在同步七项认证证据。', highlights: [{ text: '完成剩余配送', tone: 'mint' }, { text: '七项认证证据', tone: 'cyan' }], advance: 'condition', completionCondition: 'ground-mission-completed' },
+  { id: '02-D06', mode: 'dialogue', speaker: 'anan', expression: 'greeting', text: '认证通过！你已经在监管时限内完成基线选择、临时绕行、返回计划路线和空地会合。', highlights: [{ text: '认证通过', tone: 'mint' }, { text: '监管时限内', tone: 'amber' }, { text: '空地会合', tone: 'cyan' }], advance: 'dialogue' },
+  { id: '02-D07', mode: 'dialogue', speaker: 'cheng', expression: 'confident', text: '七项运行证据已经全部确认。进阶规划权限开放，之后你可以在普通任务中自由制定地面执行基线。', highlights: [{ text: '七项运行证据', tone: 'cyan' }, { text: '进阶规划权限开放', tone: 'mint' }], advance: 'dialogue' }
+])
+
 export const PLANNER_DEPENDENT_STEPS = new Set(['D07', 'D08', 'A02', 'A03', 'D09', 'A04'])
 export const AIRSPACE_PANEL_DEPENDENT_STEPS = new Set(['D14-INSPECT', 'A09-DETOUR'])
 export const RUN_DEPENDENT_STEPS = new Set(['D10', 'D11', 'D11-DEVICE', 'A04-FOLLOW', 'D11-FOLLOW', 'A04-OVERVIEW', 'D11-MOUSE', 'D12', 'WAIT-RED-VIOLATION', 'D13-REWIND', 'A07-CHECKPOINT', 'A08-RESTORE', 'D14-RETRY', 'A09-CONFLICT', 'D14-INSPECT', 'A09-DETOUR', 'D15-DETOUR', 'WAIT-DIAMOND', 'D16-REWARD', 'D17-BATTERY', 'D18-COMPLETE'])
 export const FLEET_HUB_DEPENDENT_STEPS = new Set(FLEET_CENTER_STEPS.slice(3).map(step => step.id))
+export const GROUND_COOP_PLANNER_STEPS = new Set(['02-A01', '02-D03', '02-A02', '02-A03'])
+export const GROUND_COOP_RUN_STEPS = new Set(GROUND_COOP_STEPS.slice(6).map(step => step.id))
 
 export const TUTORIAL_CHAPTERS = Object.freeze([
   Object.freeze({
@@ -77,8 +106,8 @@ export const TUTORIAL_CHAPTERS = Object.freeze([
     steps: PROLOGUE_STEPS,
     introKicker: 'MISSION MANUAL / PROLOGUE 00',
     introSubtitle: 'CITY AIR-GROUND LOGISTICS COMMAND',
-    completeKicker: 'OPERATOR READY',
-    completeTitle: 'PROLOGUE COMPLETE',
+    completeKicker: '调度员已就绪',
+    completeTitle: '教程 00 完成',
     completeSubtitle: '关键节点回溯、红色空域绕飞与粉钻领取已完成'
   }),
   Object.freeze({
@@ -92,9 +121,24 @@ export const TUTORIAL_CHAPTERS = Object.freeze([
     steps: FLEET_CENTER_STEPS,
     introKicker: 'MISSION MANUAL / CHAPTER 01',
     introSubtitle: 'FLEET CENTER ORIENTATION',
-    completeKicker: 'FLEET ACCESS READY',
-    completeTitle: 'CHAPTER 01 COMPLETE',
+    completeKicker: '车队权限已开放',
+    completeTitle: '教程 01 完成',
     completeSubtitle: '车队中心已开放自由查看'
+  }),
+  Object.freeze({
+    id: GROUND_COOP_TUTORIAL_CHAPTER,
+    index: '02',
+    eyebrow: 'CHAPTER',
+    title: '联合配送资格认证',
+    description: '在固定教学任务中选择执行基线，判断并执行临时绕行，返回基线后观察无人机离舱、会合与回收。',
+    storageKey: GROUND_COOP_TUTORIAL_STORAGE_KEY,
+    version: GROUND_COOP_TUTORIAL_VERSION,
+    steps: GROUND_COOP_STEPS,
+    introKicker: 'MISSION MANUAL / CHAPTER 02',
+    introSubtitle: 'DYNAMIC ROUTING & RENDEZVOUS',
+    completeKicker: '进阶规划已就绪',
+    completeTitle: '教程 02 完成',
+    completeSubtitle: '进阶规划已解锁 · 空地会合认证通过'
   })
 ])
 

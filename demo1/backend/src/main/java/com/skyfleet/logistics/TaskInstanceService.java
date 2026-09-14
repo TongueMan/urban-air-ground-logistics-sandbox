@@ -3,6 +3,8 @@ package com.skyfleet.logistics;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -28,44 +30,86 @@ import java.util.UUID;
 
 @Service
 public class TaskInstanceService {
-    public static final String GENERATOR_VERSION = "mission-generator/2.1.3";
-    public static final String RULESET_VERSION = "delivery-economy/2.0.0";
+    public static final String GENERATOR_VERSION = "mission-generator/2.1.4";
+    public static final String RULESET_VERSION = "delivery-economy/2.1.1";
+    private static final String ADVANCED_FALLBACK_POLICY = "CURATED_CAMPUS_ROAD_GRAPH_V2";
     private static final long DIAMOND_REWARD_MINOR = 480_000L;
+    private static final long GROUND_COIN_REWARD_MINOR = 80_000L;
+    private static final long GROUND_TROPHY_REWARD_MINOR = 300_000L;
+    private static final double GROUND_TROPHY_MIN_SPACING_METERS = 60;
+    private static final double GROUND_REWARD_ROUTE_TOLERANCE_METERS = 20;
     private static final List<Long> REWARD_DENOMINATIONS_MINOR = List.of(30_000L, 50_000L, 80_000L, 120_000L, 180_000L);
     private static final double DELIVERY_AIRSPACE_BUFFER_METERS = 35;
     private static final double DIAMOND_MIN_SPACING_METERS = 45;
     private static final int MAX_ATTEMPTS = 20;
-    private static final int MAX_AUTOMATIC_SEEDS = 4;
+    // Automatic generation is allowed to discard an unlucky seed entirely. Four seeds still
+    // produced occasional 422 responses when every deterministic attempt hit incompatible
+    // airspace/reward combinations, so keep enough independent seeds for a reliable UI action.
+    private static final int MAX_AUTOMATIC_SEEDS = 8;
     private final ScenarioTemplateCatalog templates;
     private final BaiduRouteProvider baidu;
     private final SimulatedTrafficLightService intersectionCatalog;
     private final FleetService fleet;
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
+    private final AdvancedRoutingProperties advancedRouting;
     private final SecureRandom secureRandom = new SecureRandom();
 
+    @Autowired
     public TaskInstanceService(ScenarioTemplateCatalog templates, BaiduRouteProvider baidu,
                                SimulatedTrafficLightService intersectionCatalog, FleetService fleet,
-                               JdbcTemplate jdbc, ObjectMapper mapper) {
+                               JdbcTemplate jdbc, ObjectMapper mapper, AdvancedRoutingProperties advancedRouting) {
         this.templates = templates;
         this.baidu = baidu;
         this.intersectionCatalog = intersectionCatalog;
         this.fleet = fleet;
         this.jdbc = jdbc;
         this.mapper = mapper;
+        this.advancedRouting = advancedRouting;
+    }
+
+    TaskInstanceService(ScenarioTemplateCatalog templates, BaiduRouteProvider baidu,
+                        SimulatedTrafficLightService intersectionCatalog, FleetService fleet,
+                        JdbcTemplate jdbc, ObjectMapper mapper) {
+        this(templates, baidu, intersectionCatalog, fleet, jdbc, mapper,
+                new AdvancedRoutingProperties(false, false, false, 300, 600, 2, 3, 40, 1500, 1.6, 18));
     }
 
     public List<Map<String, Object>> templateSummaries() { return templates.summaries(); }
 
     @Transactional
     public Map<String, Object> generate(String visitorHash, String templateId, String seedInput, Map<String, Object> rawParameters) {
+        return generate(visitorHash, templateId, seedInput, rawParameters, "BASIC", null);
+    }
+
+    @Transactional
+    public Map<String, Object> generate(String visitorHash, String templateId, String seedInput,
+                                        Map<String, Object> rawParameters, String planningModeValue, String tutorialId) {
         ScenarioTemplateCatalog.Descriptor descriptor;
         try { descriptor = templates.descriptor(templateId); }
         catch (IllegalArgumentException error) { throw new DemoException(HttpStatus.BAD_REQUEST, error.getMessage()); }
+        String planningMode = String.valueOf(planningModeValue == null ? "BASIC" : planningModeValue).trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("BASIC", "ADVANCED").contains(planningMode))
+            throw new DemoException(HttpStatus.BAD_REQUEST, "planningMode 仅支持 BASIC 或 ADVANCED");
+        if ("ADVANCED".equals(planningMode)) {
+            if (!advancedRouting.anyAdvancedCapabilityEnabled())
+                throw new DemoException(HttpStatus.NOT_FOUND, "进阶路线能力尚未开放");
+            if (!ScenarioTemplateCatalog.CAMPUS_TEMPLATE_ID.equals(templateId))
+                throw new DemoException(HttpStatus.BAD_REQUEST, "进阶规划首版仅支持翡翠湖校区");
+        }
         boolean automaticSeed = seedInput == null || seedInput.isBlank();
         Map<String, Object> parameters = parameters(descriptor, rawParameters == null ? Map.of() : rawParameters);
         FleetService.GroundVehicle groundVehicle = fleet.freezeGroundVehicle(visitorHash);
         FleetService.AirVehicle airVehicle = fleet.freezeAirVehicle(visitorHash);
+        boolean groundTutorial = TutorialProgressService.GROUND_COOP_ID.equals(tutorialId);
+        if (groundTutorial) {
+            // The qualification exercise teaches one stable carrier/UAV rhythm. Keep the
+            // real deployed asset ids for optimistic binding, but freeze tutorial gameplay
+            // stats before candidate generation so a deployed VTOL cannot switch the
+            // generator into the independent-aircraft ruleset.
+            groundVehicle = tutorialGroundVehicle(groundVehicle);
+            airVehicle = tutorialAirVehicle(airVehicle);
+        }
         List<Map<String, Object>> trace = List.of();
         Object lastReasons = List.of();
         int seedLimit = automaticSeed ? MAX_AUTOMATIC_SEEDS : 1;
@@ -77,7 +121,19 @@ public class TaskInstanceService {
                 String attemptDomain = "attempt/" + attempt;
                 try {
                     Generated generated = candidate(descriptor, seed, parameters, attemptDomain, groundVehicle, airVehicle);
-                    List<Map<String, Object>> violations = validate(generated.plan(), parameters);
+                    if ("ADVANCED".equals(planningMode)) {
+                        generated = advancedCandidate(descriptor, seed, parameters, attemptDomain, groundVehicle, airVehicle, generated);
+                    }
+                    List<Map<String, Object>> violations;
+                    if (groundTutorial) {
+                        // Tutorial 02 deliberately removes random airspace and rewards. Do that
+                        // before validation so an expendable random challenge cannot prevent the
+                        // fixed tutorial mission from being created.
+                        prepareGroundTutorialPlan(generated.plan());
+                        violations = validateGroundTutorialPlan(generated.plan());
+                    } else {
+                        violations = validate(generated.plan(), parameters);
+                    }
                     if (!violations.isEmpty()) {
                         trace.add(trace(attempt, seed, violations.stream().map(v -> String.valueOf(v.get("code"))).toList(), "REJECTED"));
                         continue;
@@ -86,8 +142,11 @@ public class TaskInstanceService {
                     Map<String, Object> validation = new LinkedHashMap<>();
                     validation.put("status", "PASSED");
                     validation.put("validatorVersion", RULESET_VERSION);
-                    validation.put("checks", List.of("GROUND_CONTINUITY", "GROUND_ANCHORS", "AIRSPACE_DECLARED_ZONES", "ALTITUDE",
-                            "FLIGHT_RANGE", "RENDEZVOUS", "DURATION", "TRAFFIC_ON_ROUTE"));
+                    validation.put("checks", groundTutorial
+                            ? List.of("GROUND_CONTINUITY", "GROUND_ANCHORS", "TUTORIAL_FLEET_PROFILE", "TUTORIAL_NO_AIRSPACE",
+                                    "ALTITUDE", "FLIGHT_RANGE", "RENDEZVOUS", "TUTORIAL_ZERO_ECONOMY")
+                            : List.of("GROUND_CONTINUITY", "GROUND_ANCHORS", "AIRSPACE_DECLARED_ZONES", "ALTITUDE",
+                                    "FLIGHT_RANGE", "RENDEZVOUS", "DURATION", "TRAFFIC_ON_ROUTE"));
                     validation.put("buildingCollision", "NOT_EVALUATED");
                     validation.put("violations", List.of());
                     String taskId = id("TASK");
@@ -98,15 +157,38 @@ public class TaskInstanceService {
                     plan.put("rulesetVersion", RULESET_VERSION);
                     plan.put("randomVersion", DeterministicRandom.VERSION);
                     plan.put("resolvedParameters", parameters);
+                    plan.put("planningMode", planningMode);
+                    plan.put("advancedPlanningSupported", "ADVANCED".equals(planningMode));
+                    if (tutorialId != null && !tutorialId.isBlank()) plan.put("tutorialId", tutorialId);
                     String planHash = planHash(plan);
                     plan.put("taskId", taskId);
                     plan.put("planHash", planHash);
                     Instant now = Instant.now();
                     Instant expiresAt = now.plusSeconds(24 * 3600);
-                    jdbc.update("INSERT INTO demo_task_instance(id,visitor_hash,scenario_template_id,scenario_template_version,generator_version,ruleset_version,seed_value,resolved_parameters_json,plan_json,validation_json,generation_trace_json,plan_hash,route_artifact_id,lifecycle_status,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            taskId, visitorHash, descriptor.id(), ScenarioTemplateCatalog.VERSION, GENERATOR_VERSION, RULESET_VERSION, seed,
-                            json(parameters), json(plan), json(validation), json(trace), planHash, generated.routeArtifactId(), "READY",
-                            Timestamp.from(now), Timestamp.from(expiresAt));
+                    try {
+                        jdbc.update("INSERT INTO demo_task_instance(id,visitor_hash,scenario_template_id,scenario_template_version,generator_version,ruleset_version,planning_mode,tutorial_id,seed_value,resolved_parameters_json,plan_json,validation_json,generation_trace_json,plan_hash,route_artifact_id,lifecycle_status,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                taskId, visitorHash, descriptor.id(), ScenarioTemplateCatalog.VERSION, GENERATOR_VERSION, RULESET_VERSION,
+                                planningMode, tutorialId, seed,
+                                json(parameters), json(plan), json(validation), json(trace), planHash, generated.routeArtifactId(), "READY",
+                                Timestamp.from(now), Timestamp.from(expiresAt));
+                    } catch (BadSqlGrammarException legacySchema) {
+                        if (!"BASIC".equals(planningMode) || (tutorialId != null && !tutorialId.isBlank())) throw legacySchema;
+                        jdbc.update("INSERT INTO demo_task_instance(id,visitor_hash,scenario_template_id,scenario_template_version,generator_version,ruleset_version,seed_value,resolved_parameters_json,plan_json,validation_json,generation_trace_json,plan_hash,route_artifact_id,lifecycle_status,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                taskId, visitorHash, descriptor.id(), ScenarioTemplateCatalog.VERSION, GENERATOR_VERSION, RULESET_VERSION,
+                                seed, json(parameters), json(plan), json(validation), json(trace), planHash,
+                                generated.routeArtifactId(), "READY", Timestamp.from(now), Timestamp.from(expiresAt));
+                    }
+                    for (RouteCandidateArtifact candidate : generated.routeCandidates()) {
+                        jdbc.update("INSERT INTO demo_task_route_candidate(task_instance_id,candidate_id,candidate_order,label,color,route_artifact_id,route_hash,distance_meters,source) VALUES(?,?,?,?,?,?,?,?,?)",
+                                taskId, candidate.candidateId(), candidate.order(), candidate.label(), candidate.color(),
+                                candidate.artifactId(), candidate.routeHash(), candidate.distanceMeters(), candidate.source());
+                    }
+                    for (Map<String, Object> reward : castListOfMaps(plan.get("groundRewards"))) {
+                        jdbc.update("INSERT INTO demo_ground_reward(task_instance_id,reward_id,reward_type,actor_kind,visual_position_json,road_anchor_json,reward_minor,trigger_radius_meters,eligible_candidate_ids_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                                taskId, reward.get("id"), reward.get("rewardType"), reward.get("actorKind"),
+                                json(reward.get("visualPosition")), json(reward.get("roadAnchor")), reward.get("rewardMinor"),
+                                reward.get("triggerRadiusMeters"), json(reward.get("eligibleCandidateIds")));
+                    }
                     return view(taskId, descriptor.id(), ScenarioTemplateCatalog.VERSION, GENERATOR_VERSION, RULESET_VERSION,
                             seed, parameters, plan, validation, trace,
                             planHash, generated.routeArtifactId(), "READY", now, expiresAt, null);
@@ -131,6 +213,87 @@ public class TaskInstanceService {
     @SuppressWarnings("unchecked")
     public Map<String, Object> loadPlanOwned(String taskId, String visitorHash) {
         return (Map<String, Object>) getOwned(taskId, visitorHash).get("plan");
+    }
+
+    @Transactional
+    public Map<String, Object> preparePlanForStart(String taskId, String visitorHash, String selectedCandidateId) {
+        Map<String, Object> task = getOwned(taskId, visitorHash);
+        Map<String, Object> plan = new LinkedHashMap<>(castMap(task.get("plan")));
+        String planningMode = String.valueOf(plan.getOrDefault("planningMode", "BASIC"));
+        if (!"ADVANCED".equals(planningMode)) return plan;
+        String requested = String.valueOf(selectedCandidateId == null ? "" : selectedCandidateId).trim();
+        if (requested.isBlank()) throw new DemoException(HttpStatus.BAD_REQUEST, "请选择一条地面基线路线");
+        Map<String, Object> selected = castListOfMaps(plan.get("routeCandidates")).stream()
+                .filter(candidate -> requested.equals(String.valueOf(candidate.get("candidateId"))))
+                .findFirst().orElseThrow(() -> new DemoException(HttpStatus.BAD_REQUEST, "候选路线不属于当前任务"));
+        Map<String, Object> ground = castListOfMaps(plan.get("routes")).stream()
+                .filter(route -> "GROUND".equals(String.valueOf(route.get("kind")))).findFirst()
+                .orElseThrow(() -> new DemoException(HttpStatus.CONFLICT, "任务缺少地面路线"));
+        Map<String, Object> executable = new LinkedHashMap<>(selected);
+        executable.put("routeId", ground.get("routeId"));
+        executable.put("deviceId", ground.get("deviceId"));
+        executable.put("kind", "GROUND");
+        executable.put("color", "#46dff2");
+        executable.put("selectedBaseline", true);
+        replaceRoute(plan, String.valueOf(ground.get("routeId")), executable);
+        plan.put("selectedBaselineRouteCandidateId", requested);
+        plan.put("baselineSelectedAt", Instant.now().toString());
+        Map<String, Object> airVehicle = castMap(plan.get("airVehicle"));
+        Map<String, Object> nodes = castMap(plan.get("sharedGroundNodes"));
+        List<Object> mandatory = new ArrayList<>();
+        if (!Boolean.TRUE.equals(airVehicle.get("independentRoute"))) {
+            mandatory.add(nodes.get("uavLaunch")); mandatory.add(nodes.get("uavRecovery"));
+        }
+        mandatory.add(nodes.get("end"));
+        plan.put("mandatoryGroundNodes", mandatory.stream().filter(Objects::nonNull).toList());
+        double distance = number(executable.get("distanceMeters"), MissionMath.polylineDistance(points(executable)));
+        double speedKph = number(executable.get("nominalSpeedKph"), number(castMap(plan.get("groundVehicle")).get("speedKph"), 18));
+        double travelSeconds = groundServiceSeconds(distance, speedKph, 0);
+        Map<String, Object> rendezvous = new LinkedHashMap<>(castMap(plan.get("rendezvousPlan")));
+        if (!Boolean.TRUE.equals(airVehicle.get("independentRoute"))) {
+            Projection launchProjection = projectToPolyline(coordinate(nodes.get("uavLaunch")), points(executable));
+            Projection recoveryProjection = projectToPolyline(coordinate(nodes.get("uavRecovery")), points(executable));
+            double launchProgress = launchProjection == null ? 8 : launchProjection.routeProgress();
+            double recoveryProgress = recoveryProjection == null ? 86 : recoveryProjection.routeProgress();
+            Map<String, Object> airRoute = castListOfMaps(plan.get("routes")).stream()
+                    .filter(route -> "AIR".equals(String.valueOf(route.get("kind")))).findFirst().orElse(Map.of());
+            double airDistance = number(airRoute.get("distanceMeters"), MissionMath.polylineDistance(points(airRoute)));
+            double airSpeedKph = number(airRoute.get("nominalSpeedKph"), number(airVehicle.get("speedKph"), 28));
+            double launchAtSeconds = travelSeconds * launchProgress / 100;
+            double vehicleAtRecoverySeconds = travelSeconds * recoveryProgress / 100;
+            double uavAtRecoverySeconds = launchAtSeconds + airDistance / (Math.max(.1, airSpeedKph) / 3.6) + 40;
+            rendezvous.put("launchRouteProgress", Math.round(launchProgress));
+            rendezvous.put("recoveryRouteProgress", Math.round(recoveryProgress));
+            rendezvous.put("vehicleArrivalSeconds", Math.ceil(vehicleAtRecoverySeconds));
+            rendezvous.put("uavArrivalSeconds", Math.ceil(uavAtRecoverySeconds));
+            rendezvous.put("estimatedWaitSeconds", Math.ceil(Math.abs(vehicleAtRecoverySeconds - uavAtRecoverySeconds)));
+            plan.put("rendezvousPlan", rendezvous);
+        }
+        double expectedWait = number(rendezvous.get("estimatedWaitSeconds"), 0);
+        double deadlineSeconds = Math.ceil(advancedRouting.paceHeadStartSeconds + travelSeconds + expectedWait);
+        Map<String, Object> pacePlan = new LinkedHashMap<>();
+        pacePlan.put("actorId", "PACE-VEH-001"); pacePlan.put("baselineRouteCandidateId", requested);
+        pacePlan.put("startDelaySeconds", advancedRouting.paceHeadStartSeconds);
+        pacePlan.put("deadlineSeconds", deadlineSeconds);
+        pacePlan.put("nominalSpeedKph", distance / Math.max(1, deadlineSeconds - advancedRouting.paceHeadStartSeconds) * 3.6);
+        pacePlan.put("routePoints", executable.get("points"));
+        pacePlan.put("ruleVersion", AdvancedRoutingProperties.RULE_VERSION);
+        plan.put("paceVehiclePlan", pacePlan);
+        List<Map<String, Object>> actors = new ArrayList<>(castListOfMaps(plan.get("actors")));
+        actors.add(new LinkedHashMap<>(Map.of(
+                "id", "PACE-VEH-001", "name", "合同监管车", "kind", "PACE_VEHICLE",
+                "deviceType", "pace_vehicle", "role", "CONTRACT_PACE", "routeId", "PACE-GROUND",
+                "capabilities", List.of("PACE_REFERENCE"))));
+        plan.put("actors", actors);
+        List<Map<String, Object>> routes = new ArrayList<>(castListOfMaps(plan.get("routes")));
+        Map<String, Object> paceRoute = new LinkedHashMap<>(executable);
+        paceRoute.put("routeId", "PACE-GROUND"); paceRoute.put("deviceId", "PACE-VEH-001"); paceRoute.put("kind", "PACE");
+        routes.add(paceRoute); plan.put("routes", routes);
+        refreshAdvancedEconomyQuote(plan, castListOfMaps(plan.get("routeCandidates")),
+                castListOfMaps(plan.get("groundRewards")), castListOfMaps(plan.get("deliveryPoints")), requested);
+        jdbc.update("UPDATE demo_task_instance SET selected_baseline_route_candidate_id=?,baseline_selected_at=NOW(3) WHERE id=? AND visitor_hash=? AND lifecycle_status='READY'",
+                requested, taskId, visitorHash);
+        return plan;
     }
 
     public Map<String, Object> loadPlan(String taskId) {
@@ -207,6 +370,10 @@ public class TaskInstanceService {
                     value.put("groundServiceElapsedMs", rs.getLong("ground_service_elapsed_ms"));
                     value.put("timelineEpoch", rs.getInt("timeline_epoch"));
                     value.put("groundAssetId", rs.getString("ground_asset_id"));
+                    value.put("planningMode", rs.getString("planning_mode"));
+                    value.put("baselineRouteCandidateId", rs.getString("baseline_route_candidate_id"));
+                    if (rs.getString("ground_runtime_state_json") != null) value.put("groundRouting", readMap(rs.getString("ground_runtime_state_json")));
+                    if (rs.getString("pace_plan_json") != null) value.put("paceVehicle", readMap(rs.getString("pace_plan_json")));
                     value.put("terminalReason", rs.getString("terminal_reason"));
                     value.put("createdAt", rs.getTimestamp("created_at").toInstant().toString());
                     if (rs.getTimestamp("started_at") != null) value.put("startedAt", rs.getTimestamp("started_at").toInstant().toString());
@@ -235,12 +402,30 @@ public class TaskInstanceService {
             event.put("simulationTimeMs", rs.getObject("simulation_time_ms") == null ? null : rs.getLong("simulation_time_ms"));
             event.put("progress", rs.getDouble("progress")); event.put("payload", readMap(rs.getString("payload_json"))); return event;
         }, runId);
+        List<Map<String, Object>> groundCommands = jdbc.query("SELECT id,command_sequence,command_type,source_type,target_id,status,failure_code,route_version,requested_at,completed_at FROM demo_ground_route_command WHERE session_id=? AND superseded_by_rewind_id IS NULL ORDER BY timeline_epoch,command_sequence",
+                (rs, row) -> {
+                    Map<String, Object> value = new LinkedHashMap<>();
+                    value.put("id", rs.getString("id")); value.put("sequence", rs.getLong("command_sequence"));
+                    value.put("type", rs.getString("command_type")); value.put("sourceType", rs.getString("source_type"));
+                    value.put("targetId", rs.getString("target_id")); value.put("status", rs.getString("status"));
+                    value.put("failureCode", rs.getString("failure_code")); value.put("routeVersion", rs.getObject("route_version"));
+                    value.put("requestedAt", rs.getTimestamp("requested_at").toInstant().toString());
+                    if (rs.getTimestamp("completed_at") != null) value.put("completedAt", rs.getTimestamp("completed_at").toInstant().toString());
+                    return value;
+                }, runId);
+        List<Map<String, Object>> groundRouteVersions = jdbc.query("SELECT timeline_epoch,route_version,source_command_id,distance_meters,route_json,activated_simulation_ms FROM demo_ground_route_version WHERE session_id=? AND superseded_by_rewind_id IS NULL ORDER BY timeline_epoch,route_version",
+                (rs, row) -> Map.of("timelineEpoch", rs.getInt("timeline_epoch"), "routeVersion", rs.getInt("route_version"),
+                        "sourceCommandId", Objects.toString(rs.getString("source_command_id"), ""),
+                        "distanceMeters", rs.getDouble("distance_meters"), "points", readList(rs.getString("route_json")),
+                        "activatedSimulationMs", rs.getLong("activated_simulation_ms")), runId);
         Map<String, Object> session = new LinkedHashMap<>();
         session.put("id", runId); session.put("taskInstanceId", run.get("taskId")); session.put("status", run.get("status"));
         session.put("progress", run.get("progress")); session.put("missionPhase", run.get("missionPhase"));
         session.put("timeScale", run.get("timeScale")); session.put("simulationElapsedMs", run.get("simulationElapsedMs"));
         session.put("groundServiceElapsedMs", run.get("groundServiceElapsedMs"));
         session.put("timelineEpoch", run.get("timelineEpoch"));
+        session.put("planningMode", run.getOrDefault("planningMode", "BASIC"));
+        if (run.get("baselineRouteCandidateId") != null) session.put("baselineRouteCandidateId", run.get("baselineRouteCandidateId"));
         if (run.get("groundAssetId") != null) session.put("groundAssetId", run.get("groundAssetId"));
         if (run.get("terminalReason") != null) session.put("terminalReason", run.get("terminalReason"));
         session.put("createdAt", run.get("createdAt")); if (run.containsKey("startedAt")) session.put("startedAt", run.get("startedAt"));
@@ -251,6 +436,9 @@ public class TaskInstanceService {
         plan.put("missionPhase", run.get("missionPhase")); plan.put("simulationId", runId);
         if (run.get("terminalReason") != null) plan.put("terminalReason", run.get("terminalReason"));
         plan.put("economy", economyForRun(visitorHash, runId, plan));
+        if (run.get("groundRouting") != null) plan.put("groundRouting", run.get("groundRouting"));
+        if (run.get("paceVehicle") != null) plan.put("paceVehicle", run.get("paceVehicle"));
+        if (!groundCommands.isEmpty()) plan.put("groundRoutingReplay", Map.of("commands", groundCommands, "routeVersions", groundRouteVersions));
         List<Map<String, Object>> checkpoints = jdbc.query("SELECT id,volume_id,timeline_epoch,simulation_time_ms,mission_progress,status,created_at,used_at FROM demo_rewind_checkpoint WHERE session_id=? ORDER BY simulation_time_ms",
                 (rs, row) -> {
                     Map<String, Object> value = new LinkedHashMap<>();
@@ -268,6 +456,7 @@ public class TaskInstanceService {
         snapshot.put("session", session); snapshot.put("mission", plan); snapshot.put("devices", latestDevices(plan, telemetry));
         snapshot.put("signals", List.of());
         return Map.of("taskId", run.get("taskId"), "run", run, "snapshot", snapshot, "telemetry", telemetry, "events", events,
+                "groundCommands", groundCommands, "groundRouteVersions", groundRouteVersions,
                 "durationMs", run.get("simulationElapsedMs"));
     }
 
@@ -549,6 +738,356 @@ public class TaskInstanceService {
         plan.put("phaseSchedule", Map.of("DEPART", List.of(0, 18), "TAKEOFF", List.of(18, 24), "DELIVERING", List.of(24, 78), "RETURNING", List.of(78, 90), "DOCKED", List.of(90, 100)));
         plan.put("events", generatedEvents(descriptor, estimated));
         return new Generated(plan, artifact.id());
+    }
+
+    private Generated advancedCandidate(ScenarioTemplateCatalog.Descriptor descriptor, String seed,
+                                        Map<String, Object> parameters, String attemptDomain,
+                                        FleetService.GroundVehicle groundVehicle, FleetService.AirVehicle airVehicle,
+                                        Generated baseline) {
+        Map<String, Object> plan = baseline.plan();
+        boolean independentAir = airVehicle.independentRoute();
+        double[] start = new double[]{117.2116751, 31.7806513, .35};
+        double[] launch = new double[]{117.2115590, 31.7799476, .35};
+        double[] recovery = new double[]{117.2113271, 31.7731678, .35};
+        double[] end = new double[]{117.2113220, 31.7716865, .35};
+        List<List<double[]>> corridorWaypoints = List.of(
+                List.of(new double[]{117.2131181, 31.7767392, .35}),
+                List.of(new double[]{117.2101860, 31.7765263, .35}),
+                // The west-side waypoint sits on a road that the provider may enter
+                // and immediately leave along the same segment. A second point south
+                // of it makes the intended through-route explicit.
+                List.of(new double[]{117.2069977, 31.7767395, .35},
+                        new double[]{117.2071531, 31.7731302, .35}));
+        List<String> colors = List.of("#39e6ff", "#ffd166", "#d46cff");
+        List<ScenarioTemplateCatalog.GroundVariant> variants = templates.groundVariants(descriptor.id(),
+                templates.route(plan, descriptor.groundRouteId()));
+        List<Map<String, Object>> fallbackRoads = new ArrayList<>();
+        for (ScenarioTemplateCatalog.GroundVariant variant : variants)
+            fallbackRoads.add(Map.of("points", variant.points()));
+        CampusRoadGraph fallbackRoadGraph = new CampusRoadGraph(fallbackRoads);
+        List<Map<String, Object>> candidates = new ArrayList<>();
+        List<RouteCandidateArtifact> artifacts = new ArrayList<>();
+        for (int index = 0; index < 3; index++) {
+            String candidateId = "ROUTE-CANDIDATE-" + (char) ('A' + index);
+            List<double[]> requestAnchors = new ArrayList<>();
+            requestAnchors.add(start);
+            if (!independentAir) requestAnchors.add(launch);
+            requestAnchors.addAll(corridorWaypoints.get(index));
+            if (!independentAir) requestAnchors.add(recovery);
+            requestAnchors.add(end);
+            List<List<Number>> fallbackAnchors = coordinateLists(requestAnchors);
+            CampusRoadGraph.Path fallbackPath = fallbackRoadGraph.route(fallbackAnchors.get(0),
+                    fallbackAnchors.get(1), fallbackAnchors.subList(2, fallbackAnchors.size()),
+                    advancedRouting.roadSnapMeters);
+            if (fallbackPath == null || fallbackPath.points().size() < 2)
+                throw new CandidateRejected("ADVANCED_FALLBACK_ROAD_PATH");
+            List<double[]> fallbackPoints = fallbackPath.points();
+            Map<String, Object> fallback = new LinkedHashMap<>(templates.route(plan, descriptor.groundRouteId()));
+            fallback.put("points", coordinateLists(fallbackPoints));
+            fallback.put("distanceMeters", MissionMath.polylineDistance(fallbackPoints));
+            fallback.put("groundRouteVariantId", variants.get(index).id());
+            fallback.put("groundRouteVariantName", variants.get(index).name());
+            Map<String, Object> request = new LinkedHashMap<>();
+            request.put("templateId", descriptor.id());
+            request.put("templateVersion", ScenarioTemplateCatalog.VERSION);
+            request.put("contractVersion", BaiduRouteProvider.CONTRACT_VERSION);
+            request.put("coordType", "bd09ll");
+            request.put("tactics", 2);
+            request.put("alternatives", 0);
+            request.put("anchors", coordinateLists(requestAnchors));
+            request.put("groundRouteVariantId", variants.get(index).id());
+            request.put("endpointPolicy", "ADVANCED_SHARED_NODES_V1");
+            request.put("providerRequestPolicy", "SEGMENT_PER_LEG_V2_NO_BACKTRACK");
+            request.put("fallbackPolicy", ADVANCED_FALLBACK_POLICY);
+            RouteArtifact artifact = resolveSegmentedAdvancedRouteArtifact(descriptor, request, fallback);
+            Map<String, Object> route = new LinkedHashMap<>(fallback);
+            route.putAll(artifact.route());
+            route.put("candidateId", candidateId);
+            route.put("label", "路线 " + (char) ('A' + index));
+            route.put("color", colors.get(index));
+            route.put("routeArtifactId", artifact.id());
+            route.put("routeSource", artifact.source());
+            route.put("nominalSpeedKph", groundVehicle.speedKph());
+            route.put("kind", "GROUND");
+            route.put("deviceId", descriptor.vehicleId());
+            String routeHash = sha256(canonicalJson(route.get("points")));
+            route.put("routeHash", routeHash);
+            candidates.add(route);
+            artifacts.add(new RouteCandidateArtifact(candidateId, index + 1, String.valueOf(route.get("label")),
+                    colors.get(index), artifact.id(), routeHash, number(route.get("distanceMeters"), 0), artifact.source()));
+        }
+        validateAdvancedRouteCandidates(candidates);
+
+        Map<String, Object> selectedPreview = new LinkedHashMap<>(candidates.get(0));
+        selectedPreview.put("routeId", descriptor.groundRouteId());
+        if (!independentAir) {
+            selectedPreview.put("launchPoint", coordinateList(launchWithHeight(launch)));
+            selectedPreview.put("recoveryPoint", coordinateList(launchWithHeight(recovery)));
+        } else {
+            selectedPreview.remove("launchPoint");
+            selectedPreview.remove("recoveryPoint");
+        }
+        replaceRoute(plan, descriptor.groundRouteId(), selectedPreview);
+        plan.put("routeCandidates", candidates);
+        Map<String, Object> nodes = new LinkedHashMap<>();
+        nodes.put("start", coordinateList(start));
+        if (!independentAir) {
+            nodes.put("uavLaunch", coordinateList(launch));
+            nodes.put("uavRecovery", coordinateList(recovery));
+        }
+        nodes.put("end", coordinateList(end));
+        plan.put("sharedGroundNodes", nodes);
+        if (!independentAir) {
+            plan.put("launchPoint", coordinateList(launchWithHeight(launch)));
+            plan.put("recoveryPoint", coordinateList(launchWithHeight(recovery)));
+        }
+        List<double[]> requiredAnchors = new ArrayList<>();
+        requiredAnchors.add(start);
+        if (!independentAir) requiredAnchors.add(launch);
+        requiredAnchors.add(corridorWaypoints.get(0).get(0));
+        if (!independentAir) requiredAnchors.add(recovery);
+        requiredAnchors.add(end);
+        plan.put("groundAnchors", coordinateLists(requiredAnchors));
+        if (!independentAir) {
+            Map<String, Object> airRoute = new LinkedHashMap<>(templates.route(plan, descriptor.airRouteId()));
+            List<double[]> airPoints = new ArrayList<>(points(airRoute));
+            double altitude = number(parameters.get("flightAltitudeMeters"), descriptor.defaultAltitude());
+            if (airPoints.size() >= 2) {
+                airPoints.set(0, new double[]{launch[0], launch[1], altitude});
+                airPoints.set(airPoints.size() - 1, new double[]{recovery[0], recovery[1], altitude});
+                airRoute.put("points", coordinateLists(airPoints));
+                airRoute.put("distanceMeters", MissionMath.polylineDistance(airPoints));
+                airRoute.put("launchPoint", coordinateList(launchWithHeight(launch)));
+                airRoute.put("recoveryPoint", coordinateList(launchWithHeight(recovery)));
+                replaceRoute(plan, descriptor.airRouteId(), airRoute);
+            }
+        }
+        plan.put("trafficLights", List.of());
+        plan.put("trafficLightStatus", Map.of("provider", "ADVANCED_ROUTING", "state", "DISABLED",
+                "message", "进阶规划首版未启用交通信号灯", "simulated", true, "liveLightCount", 0));
+
+        Map<String, Object> ground = templates.route(plan, descriptor.groundRouteId());
+        Projection launchProjection = projectToPolyline(launch, points(ground));
+        Projection recoveryProjection = projectToPolyline(recovery, points(ground));
+        Map<String, Object> rendezvous = new LinkedHashMap<>(castMap(plan.get("rendezvousPlan")));
+        if (!independentAir) {
+            rendezvous.put("launchRouteProgress", Math.round(launchProjection == null ? 8 : launchProjection.routeProgress()));
+            rendezvous.put("recoveryRouteProgress", Math.round(recoveryProjection == null ? 86 : recoveryProjection.routeProgress()));
+        }
+        plan.put("rendezvousPlan", rendezvous);
+        plan.put("advancedRoutingRuleVersion", AdvancedRoutingProperties.RULE_VERSION);
+        plan.put("groundRoutingLimits", Map.of(
+                "roadSnapMeters", advancedRouting.roadSnapMeters,
+                "maximumExtraMeters", advancedRouting.maximumExtraMeters,
+                "maximumRemainingRatio", advancedRouting.maximumRemainingRatio,
+                "minimumRequestIntervalMs", advancedRouting.minimumRequestIntervalMs,
+                "clickMergeMs", advancedRouting.clickMergeMs,
+                "pointerMovePixels", advancedRouting.pointerMovePixels,
+                "clickBurstWindowMs", advancedRouting.clickBurstWindowMs,
+                "clickBurstThreshold", advancedRouting.clickBurstThreshold,
+                "clickBurstSuppressionMs", advancedRouting.clickBurstSuppressionMs));
+
+        List<Map<String, Object>> rewards = advancedGroundRewards(descriptor, candidates, seed, attemptDomain);
+        plan.put("groundRewards", rewards);
+        List<Map<String, Object>> deliveryPoints = new ArrayList<>(castListOfMaps(plan.get("deliveryPoints")));
+        deliveryPoints.removeIf(point -> "GROUND".equals(String.valueOf(point.get("kind"))));
+        deliveryPoints.addAll(rewards);
+        plan.put("deliveryPoints", deliveryPoints);
+        plan.put("deliveryTargets", deliveryPoints.stream().map(point -> Map.of(
+                "id", point.get("id"), "kind", point.get("kind"), "position", point.get("position"))).toList());
+        refreshAdvancedEconomyQuote(plan, candidates, rewards, deliveryPoints, null);
+        return new Generated(plan, null, artifacts);
+    }
+
+    private static void appendDistinct(List<double[]> target, double[] point) {
+        if (target.isEmpty() || horizontalDistance(target.get(target.size() - 1), point) > .5) target.add(point.clone());
+    }
+
+    private static double[] launchWithHeight(double[] point) { return new double[]{point[0], point[1], 2.35}; }
+    private static List<Number> coordinateList(double[] point) { return List.of(point[0], point[1], point.length > 2 ? point[2] : 0); }
+
+    private static List<Map<String, Object>> advancedGroundRewards(ScenarioTemplateCatalog.Descriptor descriptor,
+                                                                    List<Map<String, Object>> candidates,
+                                                                    String seed, String attemptDomain) {
+        List<Map<String, Object>> rewards = new ArrayList<>();
+        addAdvancedGroundReward(rewards, descriptor, candidates, candidates.get(0), .42,
+                "GROUND-REWARD-01", "GROUND_COIN", GROUND_COIN_REWARD_MINOR, 14, "LARGE");
+        addAdvancedGroundReward(rewards, descriptor, candidates, candidates.get(1), .58,
+                "GROUND-REWARD-02", "GROUND_COIN", GROUND_COIN_REWARD_MINOR, 14, "LARGE");
+
+        DeterministicRandom random = new DeterministicRandom(DeterministicRandom.derive(
+                seed, attemptDomain + "/ground-trophies"));
+        int trophyCount = 2 + random.nextInt(4);
+        List<Integer> routeOrder = new ArrayList<>(List.of(0, 1, 2));
+        deterministicShuffle(routeOrder, random);
+        List<Integer> assignments = new ArrayList<>();
+        while (assignments.size() < trophyCount) {
+            for (int candidateIndex : routeOrder) {
+                if (assignments.size() >= trophyCount) break;
+                assignments.add(candidateIndex);
+            }
+            if (assignments.size() < trophyCount) deterministicShuffle(routeOrder, random);
+        }
+
+        List<Double> progressBands = new ArrayList<>();
+        for (int index = 0; index < trophyCount; index++) {
+            double centre = .20 + (index + .5) * .60 / trophyCount;
+            progressBands.add(centre + (random.nextDouble() - .5) * .05);
+        }
+        deterministicShuffle(progressBands, random);
+        List<double[]> coinAnchors = rewards.stream().map(item -> coordinate(item.get("roadAnchor")))
+                .filter(Objects::nonNull).toList();
+        List<List<GroundTrophyPlacement>> placementPools = new ArrayList<>();
+        for (int index = 0; index < trophyCount; index++) {
+            Map<String, Object> route = candidates.get(assignments.get(index));
+            String routeId = String.valueOf(route.get("candidateId"));
+            List<Double> fractions = new ArrayList<>();
+            for (int sample = 0; sample <= 60; sample++) fractions.add(.20 + sample * .01);
+            double targetProgress = progressBands.get(index);
+            fractions.sort(Comparator.comparingDouble(fraction -> Math.abs(fraction - targetProgress)));
+            List<GroundTrophyPlacement> pool = new ArrayList<>();
+            for (double fraction : fractions) {
+                double[] candidateAnchor = MissionMath.sample(points(route), fraction);
+                if (coinAnchors.stream().anyMatch(other ->
+                        horizontalDistance(candidateAnchor, other) < GROUND_TROPHY_MIN_SPACING_METERS)) continue;
+                List<String> eligible = eligibleGroundRewardCandidates(candidateAnchor, candidates);
+                if (eligible.contains(routeId)) pool.add(new GroundTrophyPlacement(candidateAnchor, routeId, eligible));
+            }
+            // Stable sorting retains target-progress preference within each class.
+            pool.sort(Comparator.comparingInt(item -> item.eligibleCandidateIds().size() == 1 ? 0 : 1));
+            placementPools.add(pool);
+        }
+        List<GroundTrophyPlacement> placements = new ArrayList<>();
+        if (!selectGroundTrophyPlacements(placementPools, 0, placements))
+            throw new CandidateRejected("GROUND_TROPHY_DISTRIBUTION");
+        for (int index = 0; index < placements.size(); index++) {
+            GroundTrophyPlacement placement = placements.get(index);
+            addAdvancedGroundReward(rewards, descriptor, candidates, placement.anchor(), placement.routeId(),
+                    "GROUND-TROPHY-" + String.format("%02d", index + 1), "GROUND_TROPHY",
+                    GROUND_TROPHY_REWARD_MINOR, 18, "TROPHY");
+        }
+        return rewards;
+    }
+
+    private static boolean selectGroundTrophyPlacements(List<List<GroundTrophyPlacement>> pools, int index,
+                                                         List<GroundTrophyPlacement> selected) {
+        if (index >= pools.size()) return true;
+        for (GroundTrophyPlacement placement : pools.get(index)) {
+            if (selected.stream().anyMatch(other -> horizontalDistance(placement.anchor(), other.anchor())
+                    < GROUND_TROPHY_MIN_SPACING_METERS)) continue;
+            selected.add(placement);
+            if (selectGroundTrophyPlacements(pools, index + 1, selected)) return true;
+            selected.remove(selected.size() - 1);
+        }
+        return false;
+    }
+
+    private static void addAdvancedGroundReward(List<Map<String, Object>> rewards,
+                                                 ScenarioTemplateCatalog.Descriptor descriptor,
+                                                 List<Map<String, Object>> candidates,
+                                                 Map<String, Object> route, double fraction,
+                                                 String id, String rewardType, long rewardMinor,
+                                                 double triggerRadiusMeters, String visualTier) {
+        addAdvancedGroundReward(rewards, descriptor, candidates, MissionMath.sample(points(route), fraction),
+                String.valueOf(route.get("candidateId")),
+                id, rewardType, rewardMinor, triggerRadiusMeters, visualTier);
+    }
+
+    private static void addAdvancedGroundReward(List<Map<String, Object>> rewards,
+                                                 ScenarioTemplateCatalog.Descriptor descriptor,
+                                                 List<Map<String, Object>> candidates, double[] anchor,
+                                                 String placementCandidateId,
+                                                 String id, String rewardType, long rewardMinor,
+                                                 double triggerRadiusMeters, String visualTier) {
+        Map<String, Object> reward = new LinkedHashMap<>();
+        reward.put("id", id); reward.put("rewardType", rewardType); reward.put("actorKind", "VEHICLE");
+        reward.put("kind", "GROUND"); reward.put("actorId", descriptor.vehicleId());
+        reward.put("routeId", descriptor.groundRouteId());
+        reward.put("visualPosition", List.of(anchor[0], anchor[1], .8));
+        reward.put("roadAnchor", List.of(anchor[0], anchor[1], .35));
+        reward.put("position", List.of(anchor[0], anchor[1], .35));
+        reward.put("rewardMinor", rewardMinor); reward.put("baseRewardMinor", rewardMinor);
+        reward.put("triggerRadiusMeters", triggerRadiusMeters); reward.put("altitudeToleranceMeters", 0);
+        reward.put("eligibleCandidateIds", eligibleGroundRewardCandidates(anchor, candidates));
+        reward.put("placementCandidateId", placementCandidateId);
+        reward.put("visualTier", visualTier);
+        rewards.add(reward);
+    }
+
+    private static List<String> eligibleGroundRewardCandidates(double[] anchor,
+                                                                List<Map<String, Object>> candidates) {
+        return candidates.stream().filter(candidate -> {
+            Projection projection = projectToPolyline(anchor, points(candidate));
+            return projection != null && projection.distanceMeters() <= GROUND_REWARD_ROUTE_TOLERANCE_METERS;
+        }).map(candidate -> String.valueOf(candidate.get("candidateId"))).toList();
+    }
+
+    private static void refreshAdvancedEconomyQuote(Map<String, Object> plan,
+                                                     List<Map<String, Object>> candidates,
+                                                     List<Map<String, Object>> groundRewards,
+                                                     List<Map<String, Object>> deliveryPoints,
+                                                     String selectedCandidateId) {
+        long maximumGroundRewardMinor = groundRewards.stream()
+                .mapToLong(point -> ((Number) point.getOrDefault("rewardMinor", 0)).longValue()).sum();
+        Map<String, Long> groundRewardMinorByCandidate = new LinkedHashMap<>();
+        Map<String, Long> trophyRewardMinorByCandidate = new LinkedHashMap<>();
+        Map<String, Long> groundCoinRewardMinorByCandidate = new LinkedHashMap<>();
+        for (Map<String, Object> candidate : candidates) {
+            String candidateId = String.valueOf(candidate.get("candidateId"));
+            List<Map<String, Object>> eligible = groundRewards.stream().filter(reward -> rawList(reward.get("eligibleCandidateIds")).stream()
+                            .map(String::valueOf).anyMatch(candidateId::equals))
+                    .toList();
+            groundRewardMinorByCandidate.put(candidateId, eligible.stream()
+                    .mapToLong(reward -> ((Number) reward.getOrDefault("rewardMinor", 0)).longValue()).sum());
+            trophyRewardMinorByCandidate.put(candidateId, eligible.stream()
+                    .filter(reward -> "GROUND_TROPHY".equals(String.valueOf(reward.get("rewardType"))))
+                    .mapToLong(reward -> ((Number) reward.getOrDefault("rewardMinor", 0)).longValue()).sum());
+            groundCoinRewardMinorByCandidate.put(candidateId, eligible.stream()
+                    .filter(reward -> !"GROUND_TROPHY".equals(String.valueOf(reward.get("rewardType"))))
+                    .mapToLong(reward -> ((Number) reward.getOrDefault("rewardMinor", 0)).longValue()).sum());
+        }
+        String quoteCandidateId = selectedCandidateId != null && groundRewardMinorByCandidate.containsKey(selectedCandidateId)
+                ? selectedCandidateId
+                : groundRewardMinorByCandidate.entrySet().stream()
+                        .min(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse("");
+        long baselineGroundRewardMinor = groundRewardMinorByCandidate.getOrDefault(quoteCandidateId, 0L);
+        long groundTrophyRewardMinor = trophyRewardMinorByCandidate.getOrDefault(quoteCandidateId, 0L);
+        long groundCoinRewardMinor = groundCoinRewardMinorByCandidate.getOrDefault(quoteCandidateId, 0L);
+        long maximumGroundTrophyRewardMinor = groundRewards.stream()
+                .filter(reward -> "GROUND_TROPHY".equals(String.valueOf(reward.get("rewardType"))))
+                .mapToLong(reward -> ((Number) reward.getOrDefault("rewardMinor", 0)).longValue()).sum();
+        long maximumGroundCoinRewardMinor = maximumGroundRewardMinor - maximumGroundTrophyRewardMinor;
+        long airRewardMinor = deliveryPoints.stream().filter(point -> "AIR".equals(String.valueOf(point.get("kind"))))
+                .mapToLong(point -> ((Number) point.getOrDefault("rewardMinor", 0)).longValue()).sum();
+        long diamondPotentialMinor = castListOfMaps(plan.get("rewardDiamonds")).stream()
+                .mapToLong(point -> ((Number) point.getOrDefault("rewardMinor", 0)).longValue()).sum();
+        Map<String, Object> quote = new LinkedHashMap<>(castMap(plan.get("economyQuote")));
+        long timelinessMinor = ((Number) quote.getOrDefault("estimatedTimelinessRewardMinor", 0)).longValue();
+        long maximumTimelinessMinor = ((Number) quote.getOrDefault("maximumTimelinessRewardMinor", timelinessMinor)).longValue();
+        quote.put("baseGroundRewardMinor", baselineGroundRewardMinor);
+        quote.put("groundCargoRewardMinor", baselineGroundRewardMinor);
+        quote.put("maximumGroundRewardMinor", maximumGroundRewardMinor);
+        quote.put("groundRewardCandidateId", quoteCandidateId);
+        quote.put("groundRewardMinorByCandidate", groundRewardMinorByCandidate);
+        quote.put("trophyRewardMinorByCandidate", trophyRewardMinorByCandidate);
+        quote.put("groundCoinRewardMinorByCandidate", groundCoinRewardMinorByCandidate);
+        quote.put("groundTrophyRewardMinor", groundTrophyRewardMinor);
+        quote.put("groundCoinRewardMinor", groundCoinRewardMinor);
+        quote.put("maximumGroundTrophyRewardMinor", maximumGroundTrophyRewardMinor);
+        quote.put("maximumGroundCoinRewardMinor", maximumGroundCoinRewardMinor);
+        quote.put("baseAirRewardMinor", airRewardMinor);
+        quote.put("airCargoRewardMinor", airRewardMinor);
+        quote.put("airCoinRewardMinor", airRewardMinor);
+        quote.put("coinRewardMinor", baselineGroundRewardMinor + airRewardMinor);
+        quote.put("diamondPotentialMinor", diamondPotentialMinor);
+        quote.put("deliveryPointCount", deliveryPoints.size());
+        quote.put("diamondCount", castListOfMaps(plan.get("rewardDiamonds")).size());
+        quote.put("estimatedGrossRewardMinor", baselineGroundRewardMinor + airRewardMinor + diamondPotentialMinor + timelinessMinor);
+        quote.put("maximumGrossRewardMinor", maximumGroundRewardMinor + airRewardMinor + diamondPotentialMinor + maximumTimelinessMinor);
+        quote.put("grossRewardMinor", quote.get("maximumGrossRewardMinor"));
+        plan.put("economyQuote", quote);
+        plan.put("deliveryPointCount", deliveryPoints.size());
+        plan.put("grossRewardMinor", quote.get("maximumGrossRewardMinor"));
     }
 
     private static List<Map<String, Object>> deliveryPoints(ScenarioTemplateCatalog.Descriptor descriptor,
@@ -943,6 +1482,129 @@ public class TaskInstanceService {
         return route;
     }
 
+    private RouteArtifact resolveSegmentedAdvancedRouteArtifact(ScenarioTemplateCatalog.Descriptor descriptor,
+                                                                 Map<String, Object> request,
+                                                                 Map<String, Object> fallbackGround) {
+        String requestHash = sha256(canonicalJson(request));
+        List<RouteArtifact> existing = jdbc.query("SELECT * FROM demo_route_artifact WHERE request_hash=?", (rs, row) ->
+                new RouteArtifact(rs.getString("id"), rs.getString("source"), readMap(rs.getString("route_json"))), requestHash);
+        if (!existing.isEmpty()) return existing.get(0);
+
+        List<double[]> anchors = pointsFromCoordinateLists((List<?>) request.get("anchors"));
+        List<double[]> stitched = new ArrayList<>();
+        List<String> providerRouteIds = new ArrayList<>();
+        long latencyMs = 0;
+        double durationSeconds = 0;
+        double trafficLightCount = 0;
+        String failureCode = null;
+        for (int index = 0; index + 1 < anchors.size(); index++) {
+            BaiduRouteProvider.ProviderResult segment = baidu.driving(List.of(anchors.get(index), anchors.get(index + 1)));
+            latencyMs += segment.latencyMs();
+            if (!segment.success()) {
+                failureCode = "SEGMENT_" + (index + 1) + "_" + segment.failureCode();
+                break;
+            }
+            List<double[]> segmentPoints = new ArrayList<>(points(segment.route()));
+            if (segmentPoints.size() < 2) {
+                failureCode = "SEGMENT_" + (index + 1) + "_EMPTY_PATH";
+                break;
+            }
+            segmentPoints.set(0, anchors.get(index).clone());
+            segmentPoints.set(segmentPoints.size() - 1, anchors.get(index + 1).clone());
+            if (hasSubstantialSegmentBacktrack(stitched, segmentPoints)) {
+                failureCode = "SEGMENT_" + (index + 1) + "_BACKTRACK";
+                break;
+            }
+            segmentPoints.forEach(point -> appendDistinct(stitched, point));
+            durationSeconds += number(segment.route().get("durationSeconds"), 0);
+            trafficLightCount += number(segment.route().get("trafficLightCount"), 0);
+            String providerRouteId = String.valueOf(segment.route().getOrDefault("providerRouteId", ""));
+            if (!providerRouteId.isBlank()) providerRouteIds.add(providerRouteId);
+        }
+
+        Map<String, Object> route;
+        String source;
+        String providerStatus;
+        if (failureCode == null && stitched.size() >= 2) {
+            route = new LinkedHashMap<>();
+            route.put("points", coordinateLists(stitched));
+            route.put("distanceMeters", MissionMath.polylineDistance(stitched));
+            route.put("durationSeconds", durationSeconds);
+            route.put("trafficLightCount", trafficLightCount);
+            route.put("providerRouteIds", providerRouteIds);
+            route.put("segmented", true);
+            source = "BAIDU_LIVE";
+            providerStatus = "SUCCESS";
+        } else {
+            route = new LinkedHashMap<>(fallbackGround);
+            List<double[]> fallbackPoints = points(route);
+            route.put("points", coordinateLists(fallbackPoints));
+            route.put("distanceMeters", MissionMath.polylineDistance(fallbackPoints));
+            route.put("segmented", true);
+            source = "TEMPLATE_FALLBACK";
+            providerStatus = "FALLBACK";
+            if (failureCode == null) failureCode = "SEGMENTED_ROUTE_EMPTY";
+        }
+        route.put("routeSource", source);
+        String id = id("ROUTE");
+        String routeHash = sha256(canonicalJson(route));
+        try {
+            jdbc.update("INSERT INTO demo_route_artifact(id,request_hash,scenario_template_id,scenario_template_version,provider_contract_version,source,request_json,route_json,route_hash,provider_status,provider_latency_ms,failure_code) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    id, requestHash, descriptor.id(), ScenarioTemplateCatalog.VERSION, BaiduRouteProvider.CONTRACT_VERSION, source,
+                    json(request), json(route), routeHash, providerStatus, latencyMs, failureCode);
+            return new RouteArtifact(id, source, route);
+        } catch (DuplicateKeyException race) {
+            return jdbc.query("SELECT * FROM demo_route_artifact WHERE request_hash=?", (rs, row) ->
+                    new RouteArtifact(rs.getString("id"), rs.getString("source"), readMap(rs.getString("route_json"))), requestHash).get(0);
+        }
+    }
+
+    static boolean hasSubstantialSegmentBacktrack(List<double[]> stitched, List<double[]> nextSegment) {
+        if (stitched.size() < 2 || nextSegment.size() < 2) return false;
+        double segmentLength = MissionMath.polylineDistance(nextSegment);
+        if (segmentLength < 60) return false;
+        double overlapMeters = directedBufferedOverlap(nextSegment, segmentLength, stitched, 8);
+        return overlapMeters > Math.max(45, segmentLength * .18);
+    }
+
+    private void validateAdvancedRouteCandidates(List<Map<String, Object>> candidates) {
+        double shortest = candidates.stream().mapToDouble(candidate -> number(candidate.get("distanceMeters"), 0))
+                .filter(distance -> distance > 0).min().orElseThrow(() -> new CandidateRejected("ADVANCED_CANDIDATE_EMPTY"));
+        for (Map<String, Object> candidate : candidates) {
+            if (number(candidate.get("distanceMeters"), 0) > shortest * advancedRouting.candidateMaximumLengthRatio)
+                throw new CandidateRejected("ADVANCED_CANDIDATE_LENGTH_RATIO");
+        }
+        for (int left = 0; left < candidates.size(); left++) {
+            for (int right = left + 1; right < candidates.size(); right++) {
+                double overlap = bufferedOverlapRate(points(candidates.get(left)), points(candidates.get(right)),
+                        advancedRouting.candidateOverlapBufferMeters);
+                if (overlap > advancedRouting.candidateMaximumOverlapRate)
+                    throw new CandidateRejected("ADVANCED_CANDIDATE_OVERLAP");
+            }
+        }
+    }
+
+    private static double bufferedOverlapRate(List<double[]> first, List<double[]> second, double bufferMeters) {
+        double firstLength = MissionMath.polylineDistance(first);
+        double secondLength = MissionMath.polylineDistance(second);
+        double firstOverlap = directedBufferedOverlap(first, firstLength, second, bufferMeters);
+        double secondOverlap = directedBufferedOverlap(second, secondLength, first, bufferMeters);
+        double sharedLength = Math.min(firstOverlap, secondOverlap);
+        double unionLength = firstLength + secondLength - sharedLength;
+        return unionLength <= 0 ? 1 : sharedLength / unionLength;
+    }
+
+    private static double directedBufferedOverlap(List<double[]> route, double routeLength,
+                                                   List<double[]> other, double bufferMeters) {
+        int samples = Math.max(2, (int) Math.ceil(routeLength / Math.max(5, bufferMeters)));
+        int overlapping = 0;
+        for (int index = 0; index <= samples; index++) {
+            double[] sample = MissionMath.sample(route, (double) index / samples);
+            if (distanceToPolyline(sample, other) <= bufferMeters) overlapping++;
+        }
+        return routeLength * overlapping / (samples + 1);
+    }
+
     private RouteArtifact resolveRouteArtifact(ScenarioTemplateCatalog.Descriptor descriptor, Map<String, Object> request,
                                                Map<String, Object> fallbackGround, boolean reverse) {
         String requestHash = sha256(canonicalJson(request));
@@ -1052,6 +1714,7 @@ public class TaskInstanceService {
             violations.add(violation("ALTITUDE_OUT_OF_RANGE", "飞行高度超出模板范围"));
         double distance = MissionMath.polylineDistance(airPoints);
         Map<String, Object> airVehicle = castMap(plan.get("airVehicle"));
+        boolean independentAir = Boolean.TRUE.equals(airVehicle.get("independentRoute"));
         double fullRangeMeters = Math.max(1, number(airVehicle.get("fullRangeKm"), 5) * 1000);
         double maximum = fullRangeMeters * (1 - number(parameters.get("returnReservePercent"), 25) / 100);
         if (distance > maximum) violations.add(violation("FLIGHT_RANGE_EXCEEDED", "无人机航程超过返航余量约束"));
@@ -1174,8 +1837,10 @@ public class TaskInstanceService {
             violations.add(violation("NO_POST_CONFLICT_REWARD", "最后一个互动空域后没有可达的无人机配送金币"));
         double[] launch = coordinate(plan.get("launchPoint"));
         double[] recovery = coordinate(plan.get("recoveryPoint"));
-        if (launch == null || distanceToPolyline(launch, groundPoints) > 20) violations.add(violation("LAUNCH_POINT_INVALID", "起飞点不在配送车路线附近"));
-        if (recovery == null || distanceToPolyline(recovery, groundPoints) > 20) violations.add(violation("RECOVERY_POINT_INVALID", "返航点不在配送车路线附近"));
+        if (launch == null || (!independentAir && distanceToPolyline(launch, groundPoints) > 20))
+            violations.add(violation("LAUNCH_POINT_INVALID", independentAir ? "航空器独立起飞点无效" : "起飞点不在配送车路线附近"));
+        if (recovery == null || (!independentAir && distanceToPolyline(recovery, groundPoints) > 20))
+            violations.add(violation("RECOVERY_POINT_INVALID", independentAir ? "航空器独立返航点无效" : "返航点不在配送车路线附近"));
         if (launch != null && !airPoints.isEmpty() && horizontalDistance(launch, airPoints.get(0)) > 10)
             violations.add(violation("AIR_ROUTE_LAUNCH_MISMATCH", "无人机航线起点与起飞点不一致"));
         if (recovery != null && !airPoints.isEmpty() && horizontalDistance(recovery, airPoints.get(airPoints.size() - 1)) > 10)
@@ -1623,6 +2288,71 @@ public class TaskInstanceService {
         plan.put("economyQuote", quote);
     }
 
+    private static FleetService.GroundVehicle tutorialGroundVehicle(FleetService.GroundVehicle deployed) {
+        return new FleetService.GroundVehicle(deployed.assetId(), "tricycle", "教程指定城市货运三轮车",
+                "tricycle", deployed.stateVersion(), 100, 18, 5, 1.5,
+                Map.of("agility", 5, "speed", 2, "endurance", 2, "capacity", 2));
+    }
+
+    private static FleetService.AirVehicle tutorialAirVehicle(FleetService.AirVehicle deployed) {
+        return new FleetService.AirVehicle(deployed.assetId(), "smart-city-drone", "教程指定轻型配送无人机",
+                "smart-city-drone", deployed.stateVersion(), 100, 28, 3, 1, 8, false,
+                Map.of("agility", 2, "speed", 3, "endurance", 2, "capacity", 1));
+    }
+
+    private static void prepareGroundTutorialPlan(Map<String, Object> plan) {
+        plan.put("tutorialBatteryProtected", true);
+        plan.put("economySuppressed", true);
+        Map<String, Object> airspace = new LinkedHashMap<>(castMap(plan.get("airspace")));
+        airspace.put("volumes", List.of()); airspace.put("noFlyZones", List.of());
+        airspace.put("airspaceProfile", Map.of("themes", List.of(), "themeLabels", List.of(), "themeCount", 0));
+        plan.put("airspace", airspace);
+        plan.put("airspaceProfile", Map.of("themes", List.of(), "themeLabels", List.of(), "themeCount", 0));
+        plan.put("noFlyZoneCount", 0); plan.put("airspaceVolumeCount", 0);
+        plan.put("rewardDiamonds", List.of()); plan.put("diamondCount", 0);
+        for (Map<String, Object> point : castListOfMaps(plan.get("deliveryPoints"))) {
+            point.put("baseRewardMinor", 0L); point.put("rewardMinor", 0L);
+        }
+        for (Map<String, Object> point : castListOfMaps(plan.get("groundRewards"))) {
+            point.put("baseRewardMinor", 0L); point.put("rewardMinor", 0L);
+        }
+        Map<String, Object> quote = new LinkedHashMap<>(castMap(plan.get("economyQuote")));
+        for (String key : List.of("grossRewardMinor", "estimatedGrossRewardMinor", "maximumGrossRewardMinor",
+                "coinRewardMinor", "diamondPotentialMinor", "estimatedTimelinessRewardMinor", "maximumTimelinessRewardMinor",
+                "baseGroundRewardMinor", "groundCargoRewardMinor", "maximumGroundRewardMinor",
+                "baseAirRewardMinor", "airCargoRewardMinor", "airCoinRewardMinor")) quote.put(key, 0L);
+        quote.put("deliveryPointCount", castListOfMaps(plan.get("deliveryPoints")).size());
+        quote.put("diamondCount", 0);
+        quote.put("airspaceFine", Map.of("baseMinor", 0L, "perSecondMinor", 0L, "maximumPerIncursionMinor", 0L));
+        quote.put("airspacePenalties", List.of());
+        plan.put("economyQuote", quote);
+        plan.put("grossRewardMinor", 0L);
+        plan.put("deliveryPointCount", castListOfMaps(plan.get("deliveryPoints")).size());
+    }
+
+    private static List<Map<String, Object>> validateGroundTutorialPlan(Map<String, Object> plan) {
+        List<Map<String, Object>> violations = new ArrayList<>();
+        Map<String, Object> airVehicle = castMap(plan.get("airVehicle"));
+        if (!"smart-city-drone".equals(String.valueOf(airVehicle.get("typeId")))
+                || Boolean.TRUE.equals(airVehicle.get("independentRoute")))
+            violations.add(violation("TUTORIAL_FLEET_PROFILE_INVALID", "教程 02 必须使用轻型车载无人机规则"));
+        if (!castListOfMaps(castMap(plan.get("airspace")).get("volumes")).isEmpty()
+                || !castListOfMaps(plan.get("rewardDiamonds")).isEmpty())
+            violations.add(violation("TUTORIAL_AIRSPACE_NOT_EMPTY", "教程 02 不应包含空域处置或粉钻挑战"));
+        if (castListOfMaps(plan.get("routeCandidates")).size() != 3)
+            violations.add(violation("TUTORIAL_ROUTE_CANDIDATES_INVALID", "教程 02 必须提供三条候选路线"));
+        if (!Boolean.TRUE.equals(plan.get("economySuppressed"))
+                || castListOfMaps(plan.get("deliveryPoints")).stream()
+                .anyMatch(point -> number(point.get("rewardMinor"), 0) != 0))
+            violations.add(violation("TUTORIAL_ECONOMY_NOT_SUPPRESSED", "教程 02 重玩不得产生经营收益"));
+        Map<String, Object> rendezvous = castMap(plan.get("rendezvousPlan"));
+        double launchProgress = number(rendezvous.get("launchRouteProgress"), -1);
+        double recoveryProgress = number(rendezvous.get("recoveryRouteProgress"), -1);
+        if (launchProgress < 0 || recoveryProgress > 100 || launchProgress >= recoveryProgress)
+            violations.add(violation("TUTORIAL_RENDEZVOUS_PROGRESS_INVALID", "教程 02 起飞与回收进度无效"));
+        return violations;
+    }
+
     private static boolean booleanParameter(Object raw, boolean fallback, String label) {
         if (raw == null) return fallback;
         if (raw instanceof Boolean value) return value;
@@ -1659,6 +2389,7 @@ public class TaskInstanceService {
     private static List<List<Number>> coordinateLists(List<double[]> points) {
         return points.stream().map(point -> List.<Number>of(point[0], point[1], point.length > 2 ? point[2] : 0)).collect(java.util.stream.Collectors.toCollection(ArrayList::new));
     }
+    static List<List<Number>> coordinateListsPublic(List<double[]> points) { return coordinateLists(points); }
     @SuppressWarnings("unchecked") private static List<Map<String, Object>> castListOfMaps(Object value) { return value instanceof List<?> list ? (List<Map<String, Object>>) list : List.of(); }
     @SuppressWarnings("unchecked") private static Map<String, Object> castMap(Object value) { return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of(); }
     private static List<?> rawList(Object value) { return value instanceof List<?> list ? list : List.of(); }
@@ -1682,13 +2413,20 @@ public class TaskInstanceService {
     }
     private String json(Object value) { try { return mapper.writeValueAsString(value); } catch (Exception error) { throw new IllegalStateException(error); } }
     private Map<String, Object> readMap(String value) { try { return mapper.readValue(value, new TypeReference<>() {}); } catch (Exception error) { throw new IllegalStateException(error); } }
+    private List<Object> readList(String value) { try { return mapper.readValue(value, new TypeReference<>() {}); } catch (Exception error) { throw new IllegalStateException(error); } }
     private List<Map<String, Object>> readListOfMaps(String value) { try { return mapper.readValue(value, new TypeReference<>() {}); } catch (Exception error) { throw new IllegalStateException(error); } }
     private static String id(String prefix) { return prefix + "-" + UUID.randomUUID().toString().replace("-", "").substring(0, 20).toUpperCase(Locale.ROOT); }
     private static String sha256(String value) { try { return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))); } catch (Exception error) { throw new IllegalStateException(error); } }
     private static double number(Object value, double fallback) { return value instanceof Number number ? number.doubleValue() : fallback; }
 
-    private record Generated(Map<String, Object> plan, String routeArtifactId) {}
+    private record Generated(Map<String, Object> plan, String routeArtifactId,
+                             List<RouteCandidateArtifact> routeCandidates) {
+        Generated(Map<String, Object> plan, String routeArtifactId) { this(plan, routeArtifactId, List.of()); }
+    }
+    private record RouteCandidateArtifact(String candidateId, int order, String label, String color,
+                                          String artifactId, String routeHash, double distanceMeters, String source) {}
     private record RouteArtifact(String id, String source, Map<String, Object> route) {}
     private record Projection(double routeProgress, double[] point, double distanceMeters) {}
+    private record GroundTrophyPlacement(double[] anchor, String routeId, List<String> eligibleCandidateIds) {}
     private static final class CandidateRejected extends RuntimeException { final String code; CandidateRejected(String code) { this.code = code; } }
 }

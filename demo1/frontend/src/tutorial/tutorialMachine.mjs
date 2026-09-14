@@ -1,6 +1,7 @@
 import {
   FLEET_HUB_DEPENDENT_STEPS,
   FLEET_TUTORIAL_CHAPTER,
+  GROUND_COOP_TUTORIAL_CHAPTER,
   PLANNER_DEPENDENT_STEPS,
   PROLOGUE_STEPS,
   RUN_DEPENDENT_STEPS,
@@ -126,10 +127,16 @@ export function resolveResumeStep(record, {
   activeRunId = '',
   rewindCheckpointRestored = false,
   redDetourApplied = false,
-  redDiamondCollected = false
+  redDiamondCollected = false,
+  groundEvidence = {}
 } = {}) {
   if (!record || record.status !== 'in_progress') return null
   const chapter = getTutorialChapter(chapterId)
+  if (chapter.id === GROUND_COOP_TUTORIAL_CHAPTER) {
+    if (record.runId && activeRunId && String(record.runId) !== String(activeRunId)) return null
+    if (record.runId && !activeRunId) return '02-D01'
+    if (record.runId && activeRunId) return resolveGroundCoopResumeStep(groundEvidence)
+  }
   let requestedStepId = record.stepId
   if (chapter.id === TUTORIAL_CHAPTER) {
     const affectedByPrematureDetour = ['A05', 'A06-CONTINUE', 'D12', 'WAIT-RED-VIOLATION'].includes(requestedStepId)
@@ -156,10 +163,23 @@ export function resolveResumeStep(record, {
   return stepId
 }
 
+export function resolveGroundCoopResumeStep(evidence = {}) {
+  if (evidence.missionCompleted) return '02-D06'
+  if (evidence.uavRecovered) return '02-W03'
+  if (evidence.uavTakeoff) return '02-W02'
+  if (evidence.returnedToBaseline) return '02-W01'
+  if (evidence.routeOutsideReward) return '02-A05'
+  if (evidence.taskStarted) return '02-W00-PACE'
+  if (evidence.baselineSelected) return '02-A03'
+  return '02-A01'
+}
+
 export function tutorialChapterUnlocked(chapterId, statuses = {}) {
   if (chapterId === TUTORIAL_CHAPTER) return true
   if (chapterId === FLEET_TUTORIAL_CHAPTER) return ['in_progress', 'completed', 'skipped'].includes(statuses[FLEET_TUTORIAL_CHAPTER])
     || ['completed', 'skipped'].includes(statuses[TUTORIAL_CHAPTER])
+  if (chapterId === GROUND_COOP_TUTORIAL_CHAPTER) return ['in_progress', 'completed', 'skipped'].includes(statuses[GROUND_COOP_TUTORIAL_CHAPTER])
+    || ['completed', 'skipped'].includes(statuses[FLEET_TUTORIAL_CHAPTER])
   return false
 }
 

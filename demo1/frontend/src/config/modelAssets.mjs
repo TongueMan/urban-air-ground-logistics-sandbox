@@ -6,6 +6,20 @@
  * selects or deploys them.
  */
 export const MODEL_ASSETS = Object.freeze({
+  'trophy-low-poly-game-ready': Object.freeze({
+    id: 'trophy-low-poly-game-ready',
+    displayName: 'Trophy - Low Poly - Game Ready',
+    category: 'reward',
+    lifecycle: 'active',
+    path: 'models/library/rewards/trophy-low-poly-game-ready.glb',
+    bytes: 42708,
+    sha256: '345fc6de68a1f0dd0b4089c013430135d37b5e2dea8af381bfce0e23495cfe5a',
+    scene: Object.freeze({ nodes: 6, meshes: 2, materials: 2, textures: 0, animations: 0, skins: 0 }),
+    license: 'CC-BY-4.0',
+    author: 'Bob.Ho',
+    source: 'https://sketchfab.com/3d-models/trophy-low-poly-game-ready-23ff15bc69d44c21be3fb5a4c3731527',
+    notes: '进阶地面路线奖杯；源模型 Y-up，地图展示时校正为 Z-up 并绕自身竖直轴旋转。'
+  }),
   'pink-diamond': Object.freeze({
     id: 'pink-diamond',
     displayName: 'Pink Diamond Airspace Reward',
@@ -47,6 +61,21 @@ export const MODEL_ASSETS = Object.freeze({
     author: 'Doz3',
     source: 'https://sketchfab.com/3d-models/ford-f350-ultity-e9102d754ed44830a44f78dded447124',
     notes: '多用途物流皮卡；保留警示灯和车载无人机停机位标定。'
+  }),
+  'highway-patrol-cruiser': Object.freeze({
+    id: 'highway-patrol-cruiser',
+    displayName: 'Highway Patrol Cruiser',
+    category: 'operations',
+    lifecycle: 'active',
+    path: 'models/library/operations/highway-patrol-cruiser.glb',
+    bytes: 5409552,
+    sha256: '2d55b8f41200fc94a49d5973306ac65162012a0e356815040c00b85d8b00bc87',
+    scene: Object.freeze({ nodes: 48, meshes: 26, materials: 19, textures: 9, animations: 1, skins: 0 }),
+    extensions: Object.freeze(['KHR_materials_emissive_strength', 'KHR_materials_specular', 'KHR_materials_transmission']),
+    license: 'CC-BY-4.0',
+    author: 'Mateusz Woliński (jeandiz)',
+    source: 'https://sketchfab.com/3d-models/highway-patrol-cruiser-3d85e608d2c847c58577074faa134cbc',
+    notes: '合同监管车辆专用模型；保留原始材质，红蓝警灯由运行态以双闪节奏交替驱动。'
   }),
   'smart-city-drone': Object.freeze({
     id: 'smart-city-drone',
@@ -159,6 +188,13 @@ export const MODEL_MAP_PRESENTATION = Object.freeze({
     visibleDroneDock: true,
     compatibilityDock: Object.freeze({ x: 0, y: -1.85, z: 1.86, radius: .72 })
   }),
+  'highway-patrol-cruiser': Object.freeze({
+    size: 5.4,
+    forwardAxis: '-Y',
+    warningBeacon: false,
+    visibleDroneDock: false,
+    emergencyLightbar: true
+  }),
   'ural-truck-vehicle-only': Object.freeze({ size: 7.8, forwardAxis: '-Y', warningBeacon: false, visibleDroneDock: false }),
   'cybertruck-fun-size': Object.freeze({ size: 5.8, forwardAxis: '-Y', warningBeacon: false, visibleDroneDock: false }),
   'peterbilt-379-optimus-prime': Object.freeze({ size: 16.5, forwardAxis: '-Y', warningBeacon: false, visibleDroneDock: false }),
@@ -168,6 +204,7 @@ export const MODEL_MAP_PRESENTATION = Object.freeze({
 
 export const ACTIVE_MODEL_ROLES = Object.freeze({
   ground_vehicle: 'tricycle',
+  pace_vehicle: 'highway-patrol-cruiser',
   smart_drone: 'smart-city-drone'
 })
 

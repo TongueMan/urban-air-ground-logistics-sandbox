@@ -1,9 +1,12 @@
 import { computed, onBeforeUnmount, readonly, ref } from 'vue'
-import { changeSpeed, createSession, executeAirspaceAction as postAirspaceAction, executeSignalCommand as postSignalCommand, generateTaskInstance, getCurrentSession, getMission, getRunReplay, getScenarioTemplates, getTaskHistory, restoreRewindCheckpoint as postRestoreRewindCheckpoint, runEventsUrl, sessionEventsUrl, startTaskRun, stopSession } from '../../api/demo'
+import { changeSpeed, createSession, executeAirspaceAction as postAirspaceAction, executeGroundRoutingCommand as postGroundRoutingCommand, executeSignalCommand as postSignalCommand, generateTaskInstance, getCurrentSession, getMission, getRunReplay, getScenarioTemplates, getTaskHistory, getTutorials, restoreRewindCheckpoint as postRestoreRewindCheckpoint, runEventsUrl, sessionEventsUrl, startTaskRun, stopSession, syncTutorialProgress } from '../../api/demo'
 import { createMissionContext } from '../context/createMissionContext'
 import { mergeDemoDelta } from '../adapters/mergeDemoDelta.mjs'
 
 const TERMINAL_STATES = new Set(['COMPLETED', 'STOPPED', 'EXPIRED', 'FAILED'])
+const RUNTIME_WATCHDOG_INTERVAL_MS = 3000
+const RUNTIME_STALL_THRESHOLD_MS = 8000
+const FALLBACK_POLL_INTERVAL_MS = 4000
 
 export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   const context = createMissionContext()
@@ -25,25 +28,57 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   const tutorialRedConflictLocked = ref(false)
   const tutorialRewindLocked = ref(false)
   const tutorialMissionReactionsSuppressed = ref(false)
+  const tutorialState = ref({ items: [], capabilities: {} })
+  const planningMode = ref('BASIC')
+  const selectedBaselineRouteCandidateId = ref('')
+  const groundRouteCommandBusy = ref(false)
+  const lastGroundRouteCommand = ref(null)
   const historyItems = ref([])
   const plannerOpen = ref(false)
   const historyOpen = ref(false)
   const replayBundle = ref(null)
   const selectedAirspaceId = ref('')
   const mapFollowingDeviceId = ref('')
+  const tutorialMapCameraTarget = ref('')
   const airspaceActionBusy = ref(false)
   const lastAirspaceAction = ref(null)
   const latestEconomyTransaction = ref(null)
   const latestAirspaceWarning = ref(null)
   let eventSource = null
   let pollTimer = null
+  let runtimeWatchdogTimer = null
+  let observedSessionId = ''
+  let lastObservedSimulationMs = 0
+  let lastRuntimeAdvanceAt = Date.now()
+  let recoveryInFlight = false
+  let groundCommandTimer = null
+  let queuedGroundIntent = null
+  let groundCommandSequence = 0
+  let groundClickTimes = []
+  let lastGroundClickHintAt = 0
 
   const session = computed(() => context.mission.value.source.session)
   const hasSession = computed(() => Boolean(session.value?.id))
   const isTerminal = computed(() => TERMINAL_STATES.has(String(session.value?.status || '')))
+  const advancedRoutingUnlocked = computed(() => Boolean(tutorialState.value?.capabilities?.advancedGroundRoutingUnlocked))
+  const tutorial02Available = computed(() => tutorialState.value?.items?.some(item => item.tutorialId === 'TUTORIAL-02-GROUND-COOP' && item.availability === 'AVAILABLE'))
+  const tutorial02Completed = computed(() => tutorialState.value?.items?.some(item => item.tutorialId === 'TUTORIAL-02-GROUND-COOP' && item.status === 'COMPLETED'))
 
   function applySnapshot(payload, { mergeEconomy = true } = {}) {
     if (!payload) return
+    if (payload.session) {
+      const nextSessionId = String(payload.session.id || '')
+      const nextSimulationMs = Number(payload.session.simulationElapsedMs || 0)
+      if (nextSessionId !== observedSessionId || nextSimulationMs !== lastObservedSimulationMs) {
+        observedSessionId = nextSessionId
+        lastObservedSimulationMs = nextSimulationMs
+        lastRuntimeAdvanceAt = Date.now()
+      }
+      if (TERMINAL_STATES.has(String(payload.session.status || ''))) {
+        stopFallbackPolling()
+        stopRuntimeWatchdog()
+      }
+    }
     context.ingestSnapshot(payload)
     if (payload.session) {
       const nextScale = Number(payload.session.timeScale ?? 1)
@@ -65,7 +100,40 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
 
   function startFallbackPolling() {
     if (pollTimer) return
-    pollTimer = window.setInterval(() => refreshMission().catch(() => {}), 15000)
+    pollTimer = window.setInterval(() => {
+      refreshMission().catch(() => { notice.value = '任务连接暂未恢复，系统会继续自动重试。' })
+    }, FALLBACK_POLL_INTERVAL_MS)
+  }
+
+  function stopRuntimeWatchdog() {
+    if (runtimeWatchdogTimer) window.clearInterval(runtimeWatchdogTimer)
+    runtimeWatchdogTimer = null
+  }
+
+  async function recoverStalledRuntime() {
+    if (recoveryInFlight) return
+    if (session.value?.status !== 'RUNNING' || Number(timeScale.value) <= 0) return
+    if (context.timeMode.value !== 'LIVE') return
+    if (Date.now() - lastRuntimeAdvanceAt < RUNTIME_STALL_THRESHOLD_MS) return
+    recoveryInFlight = true
+    // Give the refreshed stream a full watchdog window before another attempt.
+    lastRuntimeAdvanceAt = Date.now()
+    notice.value = '任务连接正在自动恢复…'
+    try {
+      await refreshMission()
+      if (session.value?.status === 'RUNNING') connectEvents()
+    } catch {
+      notice.value = '任务连接暂未恢复，系统会继续自动重试。'
+      startFallbackPolling()
+    } finally {
+      recoveryInFlight = false
+    }
+  }
+
+  function startRuntimeWatchdog() {
+    if (runtimeWatchdogTimer) return
+    lastRuntimeAdvanceAt = Date.now()
+    runtimeWatchdogTimer = window.setInterval(recoverStalledRuntime, RUNTIME_WATCHDOG_INTERVAL_MS)
   }
 
   function applyDelta(type, event) {
@@ -77,6 +145,7 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     }
     applySnapshot(merged)
     if (type === 'command-ack') lastCommandAck.value = delta.command
+    if (type === 'ground-route-command') lastGroundRouteCommand.value = delta.command || null
     if (type === 'economy-delta') {
       latestEconomyTransaction.value = delta.transaction ? { ...delta.transaction, receivedAt: Date.now() } : null
       onEconomy?.(delta.economy)
@@ -92,19 +161,24 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
 
   function connectEvents() {
     eventSource?.close()
-    if (!session.value?.id || isTerminal.value) return
+    if (!session.value?.id || isTerminal.value) {
+      stopRuntimeWatchdog()
+      return
+    }
+    startRuntimeWatchdog()
     eventSource = new EventSource(session.value.taskInstanceId ? runEventsUrl(session.value.id) : sessionEventsUrl(session.value.id), { withCredentials: true })
     eventSource.onopen = () => { notice.value = ''; stopFallbackPolling() }
     eventSource.addEventListener('snapshot', event => {
       notice.value = ''
       applySnapshot(JSON.parse(event.data))
     })
-    ;['mission-delta', 'track-delta', 'signal-delta', 'command-ack', 'airspace-delta', 'airspace-warning', 'economy-delta', 'rewind-checkpoint'].forEach(type => {
+    ;['mission-delta', 'track-delta', 'signal-delta', 'command-ack', 'airspace-delta', 'airspace-warning', 'economy-delta', 'rewind-checkpoint', 'ground-route-command', 'ground-route-delta', 'pace-vehicle-delta', 'tutorial-progress'].forEach(type => {
       eventSource.addEventListener(type, event => applyDelta(type, event))
     })
     eventSource.addEventListener('session-end', event => {
       applySnapshot(JSON.parse(event.data))
       eventSource?.close()
+      loadTutorialState().then(result => { tutorialState.value = result || tutorialState.value }).catch(() => {})
     })
     eventSource.onerror = () => {
       notice.value = '实时链路正在重连，已保留最近一次任务数据。'
@@ -114,9 +188,10 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
 
   async function initialize() {
     try {
-      const [templateResult, historyResult] = await Promise.all([getScenarioTemplates(), getTaskHistory(20)])
+      const [templateResult, historyResult, tutorialResult] = await Promise.all([getScenarioTemplates(), getTaskHistory(20), loadTutorialState()])
       scenarioTemplates.value = templateResult?.items || []
       historyItems.value = historyResult?.items || []
+      tutorialState.value = tutorialResult || { items: [], capabilities: {} }
       applySnapshot(await getCurrentSession())
       if (session.value?.id) {
         // /current already returns the complete visitor snapshot. Fetching the
@@ -135,11 +210,15 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     notice.value = ''
     try {
       taskPreview.value = await generateTaskInstance(payload)
+      selectedBaselineRouteCandidateId.value = ''
       plannerOpen.value = true
       context.ingestSnapshot({ session: null, mission: taskPreview.value.plan, devices: previewDevices(taskPreview.value.plan) })
       return taskPreview.value
     } catch (error) {
       notice.value = error.message
+      if (tutorialGenerationPreset.value?.tutorialId === 'TUTORIAL-02-GROUND-COOP') {
+        await refreshTutorialState().catch(() => null)
+      }
       throw error
     } finally { busy.value = false }
   }
@@ -149,7 +228,9 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     busy.value = true
     notice.value = ''
     try {
-      applySnapshot(await startTaskRun(taskPreview.value.taskId))
+      const selected = selectedBaselineRouteCandidateId.value
+      applySnapshot(await startTaskRun(taskPreview.value.taskId, selected ? { selectedBaselineRouteCandidateId: selected } : null))
+      taskPreview.value = null
       plannerOpen.value = false
       tutorialGenerationPreset.value = null
       selectedAirspaceId.value = ''
@@ -167,6 +248,7 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
 
   function discardTaskPreview() {
     taskPreview.value = null
+    selectedBaselineRouteCandidateId.value = ''
     notice.value = ''
     context.ingestSnapshot(null)
   }
@@ -194,11 +276,32 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   }
 
   function openPlanner() { plannerOpen.value = true; historyOpen.value = false }
+  function openPlannerMode(mode = 'BASIC') {
+    const nextMode = mode === 'ADVANCED' ? 'ADVANCED' : 'BASIC'
+    const previewMode = String(taskPreview.value?.plan?.planningMode || 'BASIC')
+    const previewIsTutorial = Boolean(taskPreview.value?.plan?.tutorialId)
+    const preserveProloguePreset = nextMode === 'BASIC'
+      && String(tutorialGenerationPreset.value?.seed || '') === '1204'
+      && !tutorialGenerationPreset.value?.tutorialId
+    if (!preserveProloguePreset) tutorialGenerationPreset.value = null
+    if (taskPreview.value && (previewMode !== nextMode || previewIsTutorial)) discardTaskPreview()
+    planningMode.value = nextMode
+    openPlanner()
+  }
+  function startGroundTutorial() {
+    const tutorialId = 'TUTORIAL-02-GROUND-COOP'
+    const previewTutorialId = String(taskPreview.value?.plan?.tutorialId || '')
+    if (taskPreview.value && (String(taskPreview.value?.plan?.planningMode || 'BASIC') !== 'ADVANCED'
+      || previewTutorialId !== tutorialId)) discardTaskPreview()
+    planningMode.value = 'ADVANCED'
+    tutorialGenerationPreset.value = Object.freeze({ seed: '2026091202', tutorialId })
+    openPlanner()
+  }
   function closePlanner() { plannerOpen.value = false }
   function closeHistory() { historyOpen.value = false }
   function setTutorialGenerationPreset(preset = null) {
     const seed = String(preset?.seed || '').trim()
-    tutorialGenerationPreset.value = seed ? Object.freeze({ seed }) : null
+    tutorialGenerationPreset.value = seed ? Object.freeze({ seed, tutorialId: preset?.tutorialId || null }) : null
   }
   function clearTutorialGenerationPreset() { tutorialGenerationPreset.value = null }
   function isAbsoluteNoFlyVolume(volumeId) {
@@ -227,6 +330,7 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   }
   function clearTutorialMissionReactionsSuppressed() { tutorialMissionReactionsSuppressed.value = false }
   function setMapFollowingDevice(deviceId = '') { mapFollowingDeviceId.value = String(deviceId || '') }
+  function setTutorialMapCameraTarget(target = '') { tutorialMapCameraTarget.value = String(target || '') }
 
   async function startMission() {
     busy.value = true
@@ -340,9 +444,12 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   function prepareNewDelivery() {
     eventSource?.close()
     stopFallbackPolling()
+    stopRuntimeWatchdog()
     context.clearFocus()
     context.returnToLive()
     taskPreview.value = null
+    planningMode.value = 'BASIC'
+    selectedBaselineRouteCandidateId.value = ''
     replayBundle.value = null
     selectedAirspaceId.value = ''
     lastAirspaceAction.value = null
@@ -358,12 +465,14 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
   }
 
   async function endMission() {
-    if (!session.value?.id) return
+    if (!session.value?.id) return true
     try {
       applySnapshot(await stopSession(session.value.id))
       eventSource?.close()
+      return true
     } catch (error) {
       notice.value = error.message
+      return false
     }
   }
 
@@ -406,12 +515,86 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     finally { airspaceActionBusy.value = false }
   }
 
+  async function dispatchGroundCommand(intent) {
+    if (!session.value?.id || session.value?.planningMode !== 'ADVANCED') return null
+    groundRouteCommandBusy.value = true
+    const sequenceFloor = Number(context.rawSnapshot.value?.mission?.groundRouting?.commandSequence || 0)
+    groundCommandSequence = Math.max(groundCommandSequence, sequenceFloor) + 1
+    const command = {
+      commandId: globalThis.crypto?.randomUUID?.() || `ground-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      commandSequence: groundCommandSequence,
+      ...intent
+    }
+    try {
+      const result = await postGroundRoutingCommand(session.value.id, command)
+      lastGroundRouteCommand.value = result.command || null
+      if (result.groundRouting) context.ingestSnapshot({ ...context.rawSnapshot.value, mission: { ...context.rawSnapshot.value.mission, groundRouting: result.groundRouting } })
+      return result.command
+    } catch (error) { notice.value = error.message; throw error }
+    finally { groundRouteCommandBusy.value = false }
+  }
+  function setGroundTemporaryTarget(intent) {
+    const limits = context.rawSnapshot.value?.mission?.groundRoutingLimits || {}
+    const now = Date.now()
+    const burstWindowMs = Math.max(100, Number(limits.clickBurstWindowMs || 2000))
+    const burstThreshold = Math.max(1, Number(limits.clickBurstThreshold || 5))
+    const burstSuppressionMs = Math.max(1000, Number(limits.clickBurstSuppressionMs || 10000))
+    groundClickTimes = groundClickTimes.filter(timestamp => now - timestamp <= burstWindowMs)
+    groundClickTimes.push(now)
+    if (groundClickTimes.length > burstThreshold && now - lastGroundClickHintAt >= burstSuppressionMs) {
+      notice.value = '调度请求较频繁，系统将只执行最新目标'
+      lastGroundClickHintAt = now
+    }
+    queuedGroundIntent = { type: 'SET_TEMPORARY_TARGET', ...intent }
+    if (groundCommandTimer) window.clearTimeout(groundCommandTimer)
+    groundCommandTimer = window.setTimeout(() => {
+      const latest = queuedGroundIntent; queuedGroundIntent = null; groundCommandTimer = null
+      dispatchGroundCommand(latest).catch(() => {})
+    }, Math.max(0, Number(limits.clickMergeMs || 300)))
+  }
+  function returnGroundToBaseline() {
+    if (groundCommandTimer) window.clearTimeout(groundCommandTimer)
+    groundCommandTimer = null; queuedGroundIntent = null
+    return dispatchGroundCommand({ type: 'RETURN_TO_BASELINE' })
+  }
+
+  async function loadTutorialState() {
+    const result = await getTutorials()
+    const migrations = [
+      ['skyfleet.tutorial.prologue.v3', 'prologue', '3'],
+      ['skyfleet.tutorial.fleet-center.v1', 'fleet-center', '1']
+    ]
+    for (const [key, tutorialId, tutorialVersion] of migrations) {
+      try {
+        const local = JSON.parse(localStorage.getItem(key) || 'null')
+        const rawStatus = String(local?.status || local?.phase || '').toUpperCase()
+        const status = rawStatus.includes('COMPLETE') ? 'COMPLETED' : rawStatus.includes('SKIP') ? 'SKIPPED' : null
+        if (status) await syncTutorialProgress({ tutorialId, tutorialVersion, status })
+      } catch { /* a malformed legacy record must not block mission startup */ }
+    }
+    return getTutorials()
+  }
+
+  async function refreshTutorialState() {
+    const result = await getTutorials()
+    tutorialState.value = result || { items: [], capabilities: {} }
+    return tutorialState.value
+  }
+
+  async function syncTutorialStatus(tutorialId, tutorialVersion, status) {
+    const result = await syncTutorialProgress({ tutorialId, tutorialVersion, status })
+    tutorialState.value = result || tutorialState.value
+    return tutorialState.value
+  }
+
   function dispose() {
     eventSource?.close()
     stopFallbackPolling()
+    stopRuntimeWatchdog()
     clearTutorialRedConflictLocked()
     clearTutorialRewindLocked()
     clearTutorialMissionReactionsSuppressed()
+    if (groundCommandTimer) window.clearTimeout(groundCommandTimer)
   }
 
   onBeforeUnmount(dispose)
@@ -439,12 +622,21 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     tutorialRedConflictLocked: readonly(tutorialRedConflictLocked),
     tutorialRewindLocked: readonly(tutorialRewindLocked),
     tutorialMissionReactionsSuppressed: readonly(tutorialMissionReactionsSuppressed),
+    tutorialState: readonly(tutorialState),
+    tutorial02Available,
+    tutorial02Completed,
+    advancedRoutingUnlocked,
+    planningMode,
+    selectedBaselineRouteCandidateId,
+    groundRouteCommandBusy: readonly(groundRouteCommandBusy),
+    lastGroundRouteCommand: readonly(lastGroundRouteCommand),
     historyItems,
     plannerOpen,
     historyOpen,
     replayBundle,
     selectedAirspaceId,
     mapFollowingDeviceId: readonly(mapFollowingDeviceId),
+    tutorialMapCameraTarget: readonly(tutorialMapCameraTarget),
     airspaceActionBusy,
     lastAirspaceAction: readonly(lastAirspaceAction),
     latestEconomyTransaction,
@@ -457,6 +649,8 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     openHistory,
     openHistoricalRun,
     openPlanner,
+    openPlannerMode,
+    startGroundTutorial,
     closePlanner,
     closeHistory,
     setTutorialGenerationPreset,
@@ -468,6 +662,7 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     setTutorialMissionReactionsSuppressed,
     clearTutorialMissionReactionsSuppressed,
     setMapFollowingDevice,
+    setTutorialMapCameraTarget,
     refreshMission,
     startMission,
     updateSpeed,
@@ -481,6 +676,10 @@ export function useLogisticsMissionRuntime({ onEconomy } = {}) {
     selectAirspace,
     closeAirspace,
     executeAirspaceAction,
+    setGroundTemporaryTarget,
+    returnGroundToBaseline,
+    refreshTutorialState,
+    syncTutorialStatus,
     dispose
   }
 }

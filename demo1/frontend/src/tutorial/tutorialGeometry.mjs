@@ -19,6 +19,24 @@ export function expandRect(rect, padding = 12, viewport = {}) {
   return { left, top, right, bottom, width: right - left, height: bottom - top }
 }
 
+export function rectsOverlap(firstRect, secondRect, padding = 0) {
+  const first = normalizeRect(firstRect)
+  const second = normalizeRect(secondRect)
+  if (!first || !second) return false
+  return !(first.right + padding <= second.left || first.left - padding >= second.right
+    || first.bottom + padding <= second.top || first.top - padding >= second.bottom)
+}
+
+export function shouldAvoidDialogueTarget(targetRect, dialogueRect, viewport = {}) {
+  const target = normalizeRect(targetRect)
+  const dialogue = normalizeRect(dialogueRect)
+  if (!target || !dialogue) return false
+  const width = Number(viewport.width || globalThis.innerWidth || 0)
+  const height = Number(viewport.height || globalThis.innerHeight || 0)
+  if (width && height && target.width * target.height > width * height * .7) return false
+  return rectsOverlap(target, dialogue, 8)
+}
+
 export function calculateConnectorPath(targetRect, sourceRect, viewport = {}) {
   const target = normalizeRect(targetRect)
   const source = normalizeRect(sourceRect)

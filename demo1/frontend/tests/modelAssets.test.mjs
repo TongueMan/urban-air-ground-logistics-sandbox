@@ -15,22 +15,26 @@ test('3D asset library catalogues all current and supplied models', () => {
     'cybertruck-fun-size',
     'ford-f350-utility',
     'gold-coin',
+    'highway-patrol-cruiser',
     'peterbilt-379-optimus-prime',
     'pink-diamond',
     'smart-city-drone',
     'tricycle',
+    'trophy-low-poly-game-ready',
     'ural-truck-vehicle-only',
     'vtol-air-taxi'
   ])
-  assert.equal(new Set(Object.values(MODEL_ASSETS).map(asset => asset.path)).size, 9)
+  assert.equal(new Set(Object.values(MODEL_ASSETS).map(asset => asset.path)).size, 11)
 })
 
 test('runtime roles only map to active catalog assets', () => {
   assert.deepEqual(ACTIVE_MODEL_ROLES, {
     ground_vehicle: 'tricycle',
+    pace_vehicle: 'highway-patrol-cruiser',
     smart_drone: 'smart-city-drone'
   })
   assert.equal(modelAssetForRole('ground_vehicle').lifecycle, 'active')
+  assert.equal(modelAssetForRole('pace_vehicle').lifecycle, 'active')
   assert.equal(modelAssetForRole('smart_drone').lifecycle, 'active')
 })
 
@@ -40,6 +44,7 @@ test('every model has an audited horizontal front axis for map heading', () => {
   assert.deepEqual(Object.fromEntries(Object.entries(MODEL_MAP_PRESENTATION).map(([id, value]) => [id, value.forwardAxis])), {
     tricycle: '+X',
     'ford-f350-utility': '+Y',
+    'highway-patrol-cruiser': '-Y',
     'ural-truck-vehicle-only': '-Y',
     'cybertruck-fun-size': '-Y',
     'peterbilt-379-optimus-prime': '-Y',
@@ -54,6 +59,13 @@ test('license and active-use metadata remain explicit', () => {
   assert.equal(MODEL_ASSETS['gold-coin'].sha256, 'f870f7744f8f393498cf937c9e5c6b37338bad2a74236f0355b293229b21a31f')
   assert.equal(MODEL_ASSETS['pink-diamond'].license, 'CC-BY-4.0')
   assert.equal(MODEL_ASSETS['pink-diamond'].sha256, 'dc1bfdf76112c9951eb2fdc7c0b86dc03a4b2d91c794348f2bce116221ed06ce')
+  assert.equal(MODEL_ASSETS['trophy-low-poly-game-ready'].license, 'CC-BY-4.0')
+  assert.equal(MODEL_ASSETS['trophy-low-poly-game-ready'].sha256, '345fc6de68a1f0dd0b4089c013430135d37b5e2dea8af381bfce0e23495cfe5a')
+  assert.equal(MODEL_ASSETS['trophy-low-poly-game-ready'].scene.animations, 0)
+  assert.equal(MODEL_ASSETS['highway-patrol-cruiser'].license, 'CC-BY-4.0')
+  assert.equal(MODEL_ASSETS['highway-patrol-cruiser'].sha256, '2d55b8f41200fc94a49d5973306ac65162012a0e356815040c00b85d8b00bc87')
+  assert.equal(MODEL_ASSETS['highway-patrol-cruiser'].scene.animations, 1)
+  assert.equal(MODEL_MAP_PRESENTATION['highway-patrol-cruiser'].emergencyLightbar, true)
   assert.equal(MODEL_ASSETS['cybertruck-fun-size'].license, 'CC-BY-NC-4.0')
   assert.equal(MODEL_ASSETS['cybertruck-fun-size'].lifecycle, 'active')
   assert.equal(MODEL_ASSETS['smart-city-drone'].license, 'NON-COMMERCIAL')

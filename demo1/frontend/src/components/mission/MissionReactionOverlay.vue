@@ -310,7 +310,7 @@ watch(() => sessionDescriptor(runtime.session.value), current => {
     return
   }
   const replay = context.timeMode.value === 'REPLAY' || Boolean(runtime.replayBundle?.value)
-  if (isLiveMissionCompletion(previousSession, current, { replay })) {
+  if (!runtime.tutorialMissionReactionsSuppressed?.value && isLiveMissionCompletion(previousSession, current, { replay })) {
     const economy = context.mission.value.source.mission?.economy || {}
     replaceState(requestMissionSettlement(state, buildMissionSettlement(current.id, economy)))
     pumpPresentation()

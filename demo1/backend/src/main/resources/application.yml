@@ -27,6 +27,26 @@ demo:
   mqtt-url: ${MQTT_URL:tcp://localhost:1883}
   mqtt-client-id: ${MQTT_CLIENT_ID:skyfleet-logistics-backend}
 mission:
+  advanced-routing:
+    technical-preview-enabled: ${ADVANCED_ROUTING_TECH_PREVIEW_ENABLED:false}
+    tutorial-02-enabled: ${TUTORIAL_02_ENABLED:false}
+    enabled: ${ADVANCED_ROUTING_ENABLED:false}
+    click-merge-ms: 300
+    minimum-request-interval-ms: 600
+    requests-per-second: 2
+    request-burst: 3
+    road-snap-meters: 40
+    maximum-extra-meters: 1500
+    maximum-remaining-ratio: 1.6
+    pace-head-start-seconds: 18
+    mandatory-node-tolerance-meters: 30
+    pointer-move-pixels: 6
+    click-burst-window-ms: 2000
+    click-burst-threshold: 5
+    click-burst-suppression-ms: 10000
+    candidate-maximum-length-ratio: 1.8
+    candidate-maximum-overlap-rate: 0.85
+    candidate-overlap-buffer-meters: 20
   routing:
     baidu:
       api-key: ${BAIDU_ROUTE_AK:}

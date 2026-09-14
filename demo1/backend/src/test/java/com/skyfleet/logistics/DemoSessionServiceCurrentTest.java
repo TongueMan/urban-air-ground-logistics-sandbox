@@ -12,10 +12,28 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DemoSessionServiceCurrentTest {
+    @Test
+    void applicationRestartDoesNotExpireRunningOrQueuedMissions() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        FleetService fleet = mock(FleetService.class);
+        DemoSessionService service = new DemoSessionService(
+                mock(MissionCatalog.class), jdbc, new ObjectMapper(), mock(MqttBridge.class),
+                mock(TaskTrafficEngine.class), mock(TaskInstanceService.class), fleet,
+                12, 100, 180, 75);
+
+        service.initialize();
+
+        verify(jdbc, never()).update(contains("status='EXPIRED'"));
+        verify(fleet).releaseInactiveBindings();
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void completedRunIsHistoryAndDoesNotBecomeTheCurrentWorkspace() {

@@ -44,6 +44,17 @@ export function mergeDemoDelta(snapshot, eventType, delta) {
     return next
   }
   if (eventType === 'command-ack') return next
+  if (eventType === 'ground-route-command' || eventType === 'ground-route-delta') {
+    if (!delta.groundRouting) return eventType === 'ground-route-command' ? next : null
+    next.mission = { ...(snapshot.mission || {}), groundRouting: delta.groundRouting }
+    return next
+  }
+  if (eventType === 'pace-vehicle-delta') {
+    if (!delta.paceVehicle) return null
+    next.mission = { ...(snapshot.mission || {}), paceVehicle: delta.paceVehicle }
+    return next
+  }
+  if (eventType === 'tutorial-progress') return next
   if (eventType === 'airspace-delta') {
     if (!delta.airspace) return null
     next.mission = { ...(snapshot.mission || {}), airspace: delta.airspace }

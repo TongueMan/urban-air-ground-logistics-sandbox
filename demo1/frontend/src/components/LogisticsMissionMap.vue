@@ -20,7 +20,8 @@
       <span><i class="ground-plan"></i>地面计划</span><span><i class="ground-actual"></i>车辆实际</span>
       <span><i class="air-plan"></i>空中计划</span><span><i class="air-actual"></i>无人机实际</span>
       <span><i class="no-fly"></i>{{ planningPreview ? '规划禁飞 / 受限空域' : '受限空域体积' }}</span>
-      <span><i class="reward-coin"></i>配送收益金币</span><span><i class="reward-diamond"></i>粉钻奖励</span>
+      <span><i class="reward-coin"></i>金币（空中 / 地面）</span><span><i class="reward-trophy"></i>奖杯（仅地面）</span>
+      <span><i class="reward-diamond"></i>粉钻（仅空中）</span>
     </div>
     <div v-if="followingId" class="follow-controls" aria-label="跟随视角" title="跟随中可使用鼠标滚轮缩放距离">
       <span>跟随 {{ followingDevice?.deviceName || followingId }}</span>
@@ -28,6 +29,14 @@
       <button type="button" :class="{ active: followMode === 'rear' }" :aria-pressed="followMode === 'rear'" @click="setFollowMode('rear')">正后方</button>
       <button class="overview-button" type="button" data-tutorial-id="return-mission-overview" @click="leaveFollow">返回总览 <kbd>Esc</kbd></button>
     </div>
+    <aside v-if="advancedRunning" class="ground-routing-hud" aria-label="进阶路线与合同监管车状态" aria-live="polite">
+      <span>ADVANCED GROUND · V{{ mission.groundRouting?.routeVersion || 1 }}</span>
+      <strong>{{ groundRoutingHeadline }}</strong>
+      <small>{{ paceSummary }}</small>
+      <small v-if="tutorialGroundHint" class="tutorial-ground-hint">{{ tutorialGroundHint }}</small>
+      <small v-if="mission.groundRouting?.activeTemporaryTarget">临时目标：{{ mission.groundRouting.activeTemporaryTarget.targetId || '地图位置' }}</small>
+      <button v-if="mission.groundRouting?.activeTemporaryTarget" type="button" data-tutorial-id="return-ground-baseline" @click="$emit('return-ground-baseline')">返回计划路线 <kbd>Esc</kbd></button>
+    </aside>
 
   </div>
 </template>
@@ -43,6 +52,7 @@ import { runtimeConfig, staticAssetCandidates } from '../config/runtime'
 import { createBaiduCyberProvider } from '../config/baiduCyberMap'
 import { ACTIVE_MODEL_ROLES, getModelAsset, mapPresentationForAsset } from '../config/modelAssets.mjs'
 import { centerSceneForTransform } from '../utils/modelSceneTransforms.mjs'
+import { emergencyLightFrame, emergencyLightSide } from '../utils/emergencyVehicleLights.mjs'
 import { missionOverviewCamera, missionViewportOptions } from '../utils/missionViewport.mjs'
 import { resolveAirspaceActivation, visibleAirspaceConflicts } from '../utils/airspaceVisibility.mjs'
 import {
@@ -58,6 +68,7 @@ import {
   missionFollowCamera,
   missionModelPhaseState,
   polylineGeometryKey,
+  remainingRouteToTarget,
   selectMissionActualPoints,
   telemetryMotionRatio,
   telemetryTransitionDuration
@@ -71,30 +82,39 @@ const props = defineProps({
   timeCursor: { type: Number, default: 100 },
   timeMode: { type: String, default: 'LIVE' },
   planningPreview: { type: Boolean, default: false },
+  selectedBaselineId: { type: String, default: '' },
   tutorialRedConflictLocked: { type: Boolean, default: false },
+  tutorialCameraTarget: { type: String, default: '' },
   modelAssignments: { type: Object, default: () => ({}) }
 })
-const emit = defineEmits(['select', 'select-airspace', 'follow-change'])
+const emit = defineEmits(['select', 'select-airspace', 'follow-change', 'select-baseline', 'dispatch-ground-reward', 'dispatch-map-point', 'return-ground-baseline'])
 const mapEl = ref(null), mapError = ref(''), mapLoading = ref(true), replayPercent = ref(100), followingId = ref(''), followMode = ref('rear')
 const layers = reactive({ planned: true, actual: true, scan: true, airspace: true, traffic: true })
-let engine = null, mapView = null, resizeObserver = null, fitted = false, prepareRenderListener = null, modelTemplates = null, followZoomScale = 1, glowTexture = null, mapDragging = false
+let engine = null, mapView = null, resizeObserver = null, fitted = false, prepareRenderListener = null, modelTemplates = null, followZoomScale = 1, glowTexture = null, mapDragging = false, pointerStart = null, lastPointerWasDrag = false, lastMapOverlayInteractionAt = 0
 let currentMissionViewportPoints = []
-let hitLayer = null, pickLayer = null, missionPointLayer = null, missionPointSignature = '', rewardPopupLayer = null, trafficLightLayer = null, trafficLightStructureSignature = ''
+let hitLayer = null, pickLayer = null, missionPointLayer = null, missionPointSignature = '', dispatchConnectorLayer = null, dispatchConnectorSignature = '', rewardPopupLayer = null, trafficLightLayer = null, trafficLightStructureSignature = ''
 let airspaceLabelLayer = null, conflictLabelLayer = null, airspaceStructureSignature = '', airspaceLabelSignature = '', conflictLabelSignature = ''
 let liveTrafficLights = [], trafficLightRenderedStateSignature = '', trafficLightRenderedNode = null
 const routeLayers = new Map(), routeSamplers = new Map(), modelRecords = new Map(), coinRecords = new Map(), coinPopups = new Map(), airspaceVisuals = new Map(), gltfLoader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder)
 const conflictAttentionStartedAt = new Map(), viewedConflictKeys = new Set()
 const pointLayerSignatures = { hit: '', pick: '' }
-const MODEL_ASSET_REVISION = 'fleet-deployment-v1'
+const MODEL_ASSET_REVISION = 'patrol-cruiser-v1'
 const COIN_ASSET_ID = 'gold-coin'
 const DIAMOND_ASSET_ID = 'pink-diamond'
+const TROPHY_ASSET_ID = 'trophy-low-poly-game-ready'
+const TROPHY_REWARD_TYPE = 'GROUND_TROPHY'
 const COIN_SPIN_RADIANS_PER_SECOND = Math.PI * 2 * .45
 const DIAMOND_SPIN_RADIANS_PER_SECOND = Math.PI * 2 * .32
+const TROPHY_SPIN_RADIANS_PER_SECOND = Math.PI * 2 * .25
+const TROPHY_TARGET_PIXELS = 84
+const TROPHY_WORLD_CAP = 14.4
 const DIAMOND_UPRIGHT_ROTATION_X = Math.PI / 2
+const TROPHY_UPRIGHT_ROTATION_X = Math.PI / 2
 const modelTemplateLoads = new Map()
 let coinTaskKey = '', coinSnapshotInitialized = false, knownCollectedPointIds = new Set()
 const ROLE_COLORS = {
   ground_vehicle: new THREE.Color('#39e6ff'),
+  pace_vehicle: new THREE.Color('#4c8dff'),
   smart_drone: new THREE.Color('#d46cff'),
   selected: new THREE.Color('#ffd166')
 }
@@ -107,11 +127,44 @@ const TRAFFIC_MOVEMENT_ARROWS = { STRAIGHT: '↑', LEFT: '←', RIGHT: '→', U_
 const MAP_UP = new THREE.Vector3(0, 0, 1)
 const AIRSPACE_LABEL_ALTITUDE_METERS = 12
 const CONFLICT_LABEL_ALTITUDE_METERS = 18
+const advancedRunning = computed(() => props.mission?.planningMode === 'ADVANCED' && props.mission?.status === 'RUNNING')
+const groundRoutingHeadline = computed(() => props.mission?.groundRouting?.routeMessage || '沿选定基线行驶')
+const paceSummary = computed(() => {
+  const pace = props.mission?.paceVehicle
+  if (!pace) return '监管车数据准备中'
+  if (Number(pace.departureCountdownSeconds) > 0) return `监管车 ${Math.ceil(pace.departureCountdownSeconds)} 秒后出发`
+  const delta = Math.round(Number(pace.distanceDeltaMeters || 0))
+  return `${delta >= 0 ? '领先' : '落后'} ${Math.abs(delta)} m · ${pace.deadlineMissed ? '已超合同时限' : '合同计时中'}`
+})
+const tutorialGroundHint = computed(() => {
+  if (props.mission?.tutorialId !== 'TUTORIAL-02-GROUND-COOP') return ''
+  const evidence = props.mission?.groundRouting?.tutorialEvidence || {}
+  const target = props.mission?.groundRouting?.activeTemporaryTarget
+  if (!evidence.routeOutsideReward) {
+    if (!target) return '教程：点击一处不在当前基线上的地面奖励'
+    const reward = (props.mission?.groundRewards || []).find(item => item.id === target.targetId)
+    const eligible = Array.isArray(reward?.eligibleCandidateIds) ? reward.eligibleCandidateIds : []
+    return eligible.includes(props.mission?.groundRouting?.baselineRouteCandidateId)
+      ? '教程：这处奖励位于当前基线，请改点另一条路线上的奖励'
+      : '教程：绕行目标已接受，等待车辆到达'
+  }
+  if (!evidence.returnedToBaseline) {
+    return target?.reached ? '教程：已到达绕行目标，现在返回计划路线' : '教程：绕行已记录，可使用“返回计划路线”'
+  }
+  if (!target) return '教程：路线调度合格，继续完成起飞、会合与回收'
+  return target.reached ? '教程：已到达绕行目标，现在返回计划路线' : '教程：正前往绕行奖励，到达后返回计划路线'
+})
 
-function roleForDevice(device) { return device.deviceType === 'smart_drone' ? 'smart_drone' : 'ground_vehicle' }
+function roleForDevice(device) {
+  if (device.deviceType === 'smart_drone') return 'smart_drone'
+  if (device.deviceType === 'pace_vehicle') return 'pace_vehicle'
+  return 'ground_vehicle'
+}
 function modelAssignmentForDevice(device) {
   const role = roleForDevice(device)
-  const assignment = props.modelAssignments?.[role]
+  // Regulatory actors are not part of the player's deployed fleet. Their
+  // presentation must therefore never inherit a player ground-vehicle choice.
+  const assignment = role === 'pace_vehicle' ? null : props.modelAssignments?.[role]
   const assetId = assignment?.modelAssetId || ACTIVE_MODEL_ROLES[role]
   return {
     role,
@@ -127,6 +180,15 @@ const hasSimulation = computed(() => hasMissionSimulation(props.mission))
 const isReplay = computed(() => hasSimulation.value && (props.timeMode === 'REPLAY'
   || ['COMPLETED', 'STOPPED', 'EXPIRED', 'FAILED'].includes(String(props.mission.state || '').toUpperCase())))
 const followingDevice = computed(() => props.devices.find(item => item.deviceId === followingId.value))
+function paceDeviceForMission() {
+  const pace = props.mission?.paceVehicle
+  if (!pace?.actorId) return null
+  return {
+    deviceId: String(pace.actorId),
+    deviceName: '合同监管车',
+    deviceType: 'pace_vehicle'
+  }
+}
 const presentation = computed(() => missionViewState(props.mission, props.devices, replayPercent.value, {
   forceReplay: props.timeMode === 'REPLAY',
   replayTimeMs: props.timeMode === 'REPLAY' ? replaySimulationTimeMs() : null
@@ -228,6 +290,38 @@ function volumeCenter(volume) {
   const count = points.length > 1 && points[0][0] === points.at(-1)[0] && points[0][1] === points.at(-1)[1] ? points.length - 1 : points.length
   return [points.slice(0, count).reduce((sum, point) => sum + point[0], 0) / count, points.slice(0, count).reduce((sum, point) => sum + point[1], 0) / count, Number(volume.floorMeters || 0)]
 }
+function markMapOverlayInteraction(event) {
+  event?.stopPropagation?.()
+  lastMapOverlayInteractionAt = Date.now()
+}
+function coordinateInsideRing(longitude, latitude, footprint) {
+  const ring = coordinates(footprint, 0)
+  if (ring.length < 3) return false
+  let inside = false
+  for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index++) {
+    const [currentLongitude, currentLatitude] = ring[index]
+    const [previousLongitude, previousLatitude] = ring[previous]
+    const crossesLatitude = (currentLatitude > latitude) !== (previousLatitude > latitude)
+    if (!crossesLatitude) continue
+    const edgeLongitude = (previousLongitude - currentLongitude) * (latitude - currentLatitude) / (previousLatitude - currentLatitude) + currentLongitude
+    if (longitude < edgeLongitude) inside = !inside
+  }
+  return inside
+}
+function visibleAirspaceAtCoordinate(longitude, latitude) {
+  if (!layers.airspace) return null
+  return airspaceVolumes().find(volume => {
+    const planning = props.planningPreview || volume.planningPreview === true
+    const activation = resolveAirspaceActivation(volume, { planningPreview: planning })
+    const visible = (planning || !['SCHEDULED', 'EXPIRED'].includes(String(volume.state || 'ACTIVE'))) && activation > 0
+    return visible && coordinateInsideRing(longitude, latitude, volume.footprint)
+  }) || null
+}
+function selectAirspaceFromMap(volumeId, event) {
+  markMapOverlayInteraction(event)
+  const id = String(volumeId || '')
+  if (id) emit('select-airspace', id)
+}
 function airspaceLabelSource(volumes = []) {
   const data = mapvthree.GeoJSONDataSource.fromGeoJSON(featureCollection(volumes.map(volume => ({
     type: 'Feature', id: volume.id,
@@ -258,7 +352,8 @@ function renderAirspaceLabel(item) {
   node.setAttribute('aria-label', corridor
     ? `${attributes.volumeLabel || attributes.volumeId}，合法高度${attributes.corridorFloor}到${attributes.corridorCeiling}米，目标${attributes.targetAltitude}米`
     : `${attributes.volumeLabel || attributes.volumeId}，${attributes.state}，上限${attributes.ceiling}米`)
-  node.addEventListener('click', event => { event.stopPropagation(); emit('select-airspace', String(attributes.volumeId || '')) })
+  node.addEventListener('pointerdown', markMapOverlayInteraction)
+  node.addEventListener('click', event => selectAirspaceFromMap(attributes.volumeId, event))
   return node
 }
 function conflictMarkerCoordinate(conflict) {
@@ -290,8 +385,10 @@ function renderConflictLabel(item) {
   const affordance = document.createElement('small'); affordance.textContent = '点击查看处置  →'
   node.title = '点击打开右侧空域详情与处置方案'
   node.setAttribute('aria-label', `${predictive ? '预测空域冲突' : '空域冲突'}，${active ? '空域当前生效' : '空域当前未生效'}，预计${attributes.eta}秒后到达，点击查看处置方案`)
-  node.append(title, detail, affordance); node.addEventListener('click', event => {
-    event.stopPropagation()
+  node.append(title, detail, affordance)
+  node.addEventListener('pointerdown', markMapOverlayInteraction)
+  node.addEventListener('click', event => {
+    markMapOverlayInteraction(event)
     viewedConflictKeys.add(interactionKey)
     node.classList.remove('is-click-inviting')
     node.classList.add('is-viewed')
@@ -307,9 +404,9 @@ function missionPointSource(points = []) {
     type: 'Feature',
     id: item.id,
     geometry: { type: 'Point', coordinates: item.coordinate },
-    properties: { markerId: item.id, markerKind: item.kind, markerLabel: item.label }
+    properties: { markerId: item.id, markerKind: item.kind, markerLabel: item.label, dispatchable: item.dispatchable === true }
   }))))
-  ;['markerId', 'markerKind', 'markerLabel'].forEach(attribute => data.defineAttribute(attribute, attribute))
+  ;['markerId', 'markerKind', 'markerLabel', 'dispatchable'].forEach(attribute => data.defineAttribute(attribute, attribute))
   return data
 }
 function rewardPopupSource(popups = []) {
@@ -324,7 +421,8 @@ function rewardPopupSource(popups = []) {
 function renderRewardPopup(item) {
   const attributes = item?.attributes || item
   const node = document.createElement('div')
-  node.className = `coin-reward-popup${String(attributes.rewardKind || '').toUpperCase() === 'DIAMOND' ? ' is-diamond' : ''}`
+  const rewardKind = String(attributes.rewardKind || '').toUpperCase()
+  node.className = `coin-reward-popup${rewardKind === 'DIAMOND' ? ' is-diamond' : rewardKind === 'TROPHY' ? ' is-trophy' : ''}`
   node.textContent = `+${new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 0 }).format(Number(attributes.amountMinor || 0) / 100)}`
   node.setAttribute('role', 'status')
   return node
@@ -402,16 +500,39 @@ function renderTrafficLight(light) {
 function renderMissionPoint(item) {
   const attributes = item?.attributes || item
   const kind = String(attributes.markerKind || 'TARGET').toLowerCase()
-  const node = document.createElement('div')
+  const dispatchable = attributes.dispatchable === true || attributes.dispatchable === 'true'
+  const node = document.createElement(dispatchable ? 'button' : 'div')
+  if (dispatchable) node.type = 'button'
+  if (dispatchable) {
+    node.dataset.tutorialGroundReward = ''
+    node.dataset.groundRewardId = String(attributes.markerId || '')
+  }
+  if (kind === 'pace') node.dataset.tutorialId = 'mission-pace-vehicle'
   node.className = `mission-point-marker is-${kind}`
-  node.setAttribute('role', 'img')
-  node.setAttribute('aria-label', String(attributes.markerLabel || '任务点'))
+  node.setAttribute('role', dispatchable ? 'button' : 'img')
+  node.setAttribute('aria-label', `${String(attributes.markerLabel || '任务点')}${dispatchable ? '，点击设为临时目标' : ''}`)
+  node.title = String(attributes.markerLabel || '任务点')
   const icon = document.createElement('span'); icon.className = 'mission-point-icon'
-  icon.textContent = kind === 'launch' ? '↑' : kind === 'recovery' ? '↓' : '◆'
-  const label = document.createElement('span'); label.className = 'mission-point-label'
-  label.textContent = String(attributes.markerLabel || '任务点')
+  icon.textContent = kind === 'launch' ? '↑' : kind === 'recovery' ? '↓' : kind === 'dispatch' ? '◎' : kind === 'pace' ? '监' : '◆'
+  // Reward models already communicate coin / trophy / diamond visually. Keep
+  // only an invisible hit target for dispatchable ground rewards and compact
+  // icons for launch, recovery and the active dispatch target.
   if (kind !== 'target') node.append(icon)
-  node.append(label)
+  if (kind === 'pace') {
+    const label = document.createElement('span')
+    label.className = 'mission-point-label'
+    label.textContent = String(attributes.markerLabel || '合同监管车')
+    node.append(label)
+  }
+  if (dispatchable) {
+    node.addEventListener('pointerdown', markMapOverlayInteraction)
+    node.addEventListener('click', event => {
+      markMapOverlayInteraction(event)
+      // DOMPoint 与底层地图使用两套事件分发。记录本次奖励点击，避免同一次
+      // 指针操作随后又被地图层解释为 MAP_POINT 并覆盖奖励 targetId。
+      emit('dispatch-ground-reward', String(attributes.markerId || ''))
+    })
+  }
   return node
 }
 function syncTrafficLightNodes() {
@@ -478,7 +599,22 @@ function tuneModelMaterial(role, assetId, node, source) {
   const key = `${node.name} ${material.name}`.toLowerCase()
   material.roughness = Math.min(Number(material.roughness ?? .65), .58)
   material.metalness = Math.max(Number(material.metalness ?? .15), .22)
-  if (assetId === 'smart-city-drone') {
+  const emergencySide = assetId === 'highway-patrol-cruiser' ? emergencyLightSide(material.name) : null
+  if (emergencySide) {
+    const color = emergencySide === 'red' ? '#ff163d' : '#1673ff'
+    material.color?.set(color)
+    material.emissive?.set(color)
+    material.emissiveIntensity = 3.6
+    material.roughness = .12
+    material.metalness = .08
+    if (key.includes('_cone')) {
+      material.transparent = true
+      material.opacity = .56
+      material.depthWrite = false
+    }
+    material.userData.emergencyLightSide = emergencySide
+    material.userData.emergencyLightCover = key.includes('_cone')
+  } else if (assetId === 'smart-city-drone') {
     material.color?.set('#eef3ff')
     if (material.emissive) material.emissive.set('#8e3bdb')
     material.emissiveIntensity = 1.2
@@ -611,7 +747,8 @@ async function ensureRewardTemplate(assetId) {
   return modelTemplateLoads.get(assetId)
 }
 async function loadAssignedModelTemplates() {
-  const assignments = props.devices.map(device => modelAssignmentForDevice(device))
+  const paceDevice = paceDeviceForMission()
+  const assignments = [...props.devices, ...(paceDevice ? [paceDevice] : [])].map(device => modelAssignmentForDevice(device))
   await Promise.all(assignments.map(item => ensureModelTemplate(item.assetId, item.role)))
 }
 async function refreshAssignedModels() {
@@ -745,6 +882,61 @@ function addVehicleDroneDock(group, dockConfig) {
   return { dock, deck, ring, deckMaterial, ringMaterial }
 }
 
+function createEmergencyLightbar(object) {
+  const lightbar = { red: [], blue: [], glows: [] }
+  object.traverse(node => {
+    if (!node.isMesh || !node.material) return
+    const materials = Array.isArray(node.material) ? node.material : [node.material]
+    const sides = new Set()
+    materials.forEach(material => {
+      const side = material.userData.emergencyLightSide || emergencyLightSide(material.name)
+      if (!side) return
+      lightbar[side].push({ material, cover: material.userData.emergencyLightCover === true })
+      sides.add(side)
+    })
+    sides.forEach(side => {
+      const materialNames = materials.map(material => String(material.name || '').toLowerCase())
+      if (!materialNames.some(name => name.includes(`${side}_cone`))) return
+      node.geometry.computeBoundingBox()
+      const center = node.geometry.boundingBox?.getCenter(new THREE.Vector3()) || new THREE.Vector3()
+      const color = side === 'red' ? '#ff244c' : '#2b78ff'
+      const glowMaterial = new THREE.SpriteMaterial({
+        map: makeGlowTexture(), color, transparent: true, opacity: .42,
+        depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending
+      })
+      const glow = new THREE.Sprite(glowMaterial)
+      glow.position.copy(center)
+      glow.scale.setScalar(.72)
+      glow.renderOrder = 12
+      glow.frustumCulled = false
+      const point = new THREE.PointLight(color, 2.2, 7, 2)
+      point.position.copy(center)
+      node.add(glow, point)
+      lightbar.glows.push({ side, glow, material: glowMaterial, point })
+    })
+  })
+  return lightbar.red.length && lightbar.blue.length ? lightbar : null
+}
+
+function updateEmergencyLightbar(record, now, reducedMotion) {
+  if (!record.emergencyLightbar) return
+  const frame = emergencyLightFrame(now, reducedMotion)
+  const emphasis = record.selected ? 1.18 : record.emphasized ? 1 : .38
+  for (const side of ['red', 'blue']) {
+    const state = frame[side]
+    record.emergencyLightbar[side].forEach(({ material, cover }) => {
+      material.emissiveIntensity = state.emissiveIntensity * emphasis
+      if (cover) material.opacity = state.coverOpacity * emphasis
+    })
+  }
+  record.emergencyLightbar.glows.forEach(({ side, glow, material, point }) => {
+    const state = frame[side]
+    material.opacity = state.glowOpacity * emphasis
+    glow.visible = material.opacity > .01
+    point.intensity = state.pointIntensity * emphasis
+  })
+}
+
 function primaryMeshBottom(object) {
   let primary = null, vertexCount = -1
   object.traverse(node => {
@@ -764,36 +956,39 @@ function cloneInstanceMaterials(object) {
 }
 
 function createCoinRecord(point, key) {
-  const isDiamond = String(point.rewardType || '').toUpperCase() === 'DIAMOND'
-  const assetId = isDiamond ? DIAMOND_ASSET_ID : COIN_ASSET_ID
+  const rewardType = String(point.rewardType || '').toUpperCase()
+  const rewardActor = String(point.kind || '').toUpperCase()
+  const isDiamond = rewardActor === 'AIR' && rewardType === 'DIAMOND'
+  const isTrophy = rewardActor === 'GROUND' && rewardType === TROPHY_REWARD_TYPE
+  const assetId = isDiamond ? DIAMOND_ASSET_ID : isTrophy ? TROPHY_ASSET_ID : COIN_ASSET_ID
   const template = modelTemplates?.get(assetId)
   const coordinate = coordinates([point.position || point.coordinate], point.kind === 'AIR' ? 70 : .35)[0]
   if (!template || !coordinate) return null
   const object = template.scene.clone(true)
   cloneInstanceMaterials(object)
   object.scale.setScalar(template.normalizedScale)
-  // The diamond's authored symmetry axis is Y, while the map uses Z as up.
-  // Rotate only the diamond into an upright pose; the coin is already authored
-  // edge-on for the map and must keep its existing orientation.
+  // The diamond and trophy are authored Y-up, while the map uses Z as up.
+  // Keep both rewards upright; the coin is already authored for the map.
   if (isDiamond) object.rotation.x = DIAMOND_UPRIGHT_ROTATION_X
+  if (isTrophy) object.rotation.x = TROPHY_UPRIGHT_ROTATION_X
   // The imported scene is centred inside this dedicated transform root, so
   // rotating it produces true self-spin instead of orbiting around a GLB
-  // authoring origin. Pink diamonds and coins deliberately share map Z as
-  // their vertical spin axis.
+  // authoring origin. Every reward deliberately shares map Z as its vertical
+  // spin axis, so the trophy never tumbles or orbits around its map anchor.
   const spinRoot = new THREE.Group()
   spinRoot.add(object)
   const group = new THREE.Group()
   group.add(spinRoot)
   const halo = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: makeGlowTexture(), color: isDiamond ? '#ff43bd' : '#ffd45a', transparent: true,
-    opacity: isDiamond ? .58 : point.kind === 'AIR' ? .19 : .3,
+    map: makeGlowTexture(), color: isDiamond ? '#ff43bd' : isTrophy ? '#ffe38a' : '#ffd45a', transparent: true,
+    opacity: isDiamond ? .58 : isTrophy ? .54 : point.kind === 'AIR' ? .19 : .3,
     depthWrite: false, depthTest: true, blending: THREE.AdditiveBlending
   }))
   halo.renderOrder = 8; halo.frustumCulled = false
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(.72, 1, 48),
-    new THREE.MeshBasicMaterial({ color: isDiamond ? '#ff55c8' : '#ffcf4a', transparent: true,
-      opacity: isDiamond ? .24 : point.kind === 'AIR' ? .13 : .27, side: THREE.DoubleSide, depthWrite: false })
+    new THREE.MeshBasicMaterial({ color: isDiamond ? '#ff55c8' : isTrophy ? '#ffe174' : '#ffcf4a', transparent: true,
+      opacity: isDiamond ? .24 : isTrophy ? .44 : point.kind === 'AIR' ? .13 : .27, side: THREE.DoubleSide, depthWrite: false })
   )
   ring.renderOrder = 7; ring.frustumCulled = false
   engine.add(group); engine.add(halo); engine.add(ring)
@@ -804,9 +999,23 @@ function createCoinRecord(point, key) {
     owned.forEach(material => {
       material.userData.rewardBaseOpacity = Number(material.opacity ?? 1)
       material.transparent = true
-      if (material.emissive?.set) {
-        material.emissive.set(isDiamond ? '#ff168f' : '#b86a08')
-        material.emissiveIntensity = Math.max(isDiamond ? 1.28 : .72, Number(material.emissiveIntensity || 0))
+      const trophyStar = isTrophy && /material\.002|star/i.test(`${node.name || ''} ${material.name || ''}`)
+      if (trophyStar) {
+        // The supplied GLB keeps the silver star in Material.002. Preserve that
+        // contrast instead of tinting every trophy mesh with the same amber
+        // emissive colour, which made the star disappear into the cup body.
+        material.color?.set('#f4f7ff')
+        material.emissive?.set('#dbe7ff')
+        material.emissiveIntensity = Math.max(1.05, Number(material.emissiveIntensity || 0))
+        material.metalness = Math.max(.9, Number(material.metalness || 0))
+        material.roughness = Math.min(.12, Number(material.roughness ?? .12))
+      } else if (material.emissive?.set) {
+        material.emissive.set(isDiamond ? '#ff168f' : isTrophy ? '#7f3d00' : '#b86a08')
+        material.emissiveIntensity = Math.max(isDiamond ? 1.28 : isTrophy ? .42 : .72, Number(material.emissiveIntensity || 0))
+        if (isTrophy) {
+          material.metalness = Math.max(.78, Number(material.metalness || 0))
+          material.roughness = Math.min(.2, Number(material.roughness ?? .2))
+        }
       }
       material.needsUpdate = true
       materials.push(material)
@@ -814,9 +1023,9 @@ function createCoinRecord(point, key) {
   })
   const tier = String(point.visualTier || 'MEDIUM').toUpperCase()
   const record = {
-    key, point, coordinate, group, spinRoot, object, halo, ring, materials, isDiamond,
-    tier, targetPixels: isDiamond ? 50 : tier === 'SMALL' ? 28 : tier === 'LARGE' ? 44 : 36,
-    worldCap: isDiamond ? 6.4 : tier === 'SMALL' ? 3.2 : tier === 'LARGE' ? 5.4 : 4.2,
+    key, point, coordinate, group, spinRoot, object, halo, ring, materials, isDiamond, isTrophy,
+    tier, targetPixels: isTrophy ? TROPHY_TARGET_PIXELS : isDiamond ? 50 : tier === 'SMALL' ? 28 : tier === 'LARGE' ? 44 : 36,
+    worldCap: isTrophy ? TROPHY_WORLD_CAP : isDiamond ? 6.4 : tier === 'SMALL' ? 3.2 : tier === 'LARGE' ? 5.4 : 4.2,
     createdAt: performance.now(), lastFrameAt: performance.now(), pickupAt: 0, pickupDuration: 600
   }
   coinRecords.set(key, record)
@@ -853,7 +1062,7 @@ function triggerCoinPickup(record, amountMinor) {
     id: `reward-${record.key}`,
     coordinate: [record.coordinate[0], record.coordinate[1], record.coordinate[2] + (record.point.kind === 'AIR' ? 2.2 : 2.8)],
     amountMinor: Number(amountMinor || record.point.rewardMinor || 0),
-    rewardKind: record.isDiamond ? 'DIAMOND' : 'COIN',
+    rewardKind: record.isDiamond ? 'DIAMOND' : record.isTrophy ? 'TROPHY' : 'COIN',
     timer: 0
   }
   popup.timer = window.setTimeout(() => {
@@ -874,6 +1083,7 @@ function syncCoinRecords() {
   const taskKey = String(props.mission?.taskId || props.mission?.simulationId || '')
   const status = String(props.mission?.state || props.mission?.status || '').toUpperCase()
   const replaying = props.timeMode === 'REPLAY'
+  const planning = props.planningPreview === true
   const active = ['RUNNING', 'QUEUED'].includes(status)
   if (taskKey !== coinTaskKey) {
     clearCoinRecords()
@@ -884,13 +1094,18 @@ function syncCoinRecords() {
   const deliveryPoints = Array.isArray(props.mission?.deliveryPoints) ? props.mission.deliveryPoints : []
   const diamonds = Array.isArray(props.mission?.rewardDiamonds) ? props.mission.rewardDiamonds : []
   const points = [...deliveryPoints, ...diamonds]
-  if ((!active && !replaying) || !taskKey || !points.length) {
+  if ((!active && !replaying && !planning) || !taskKey || !points.length) {
     clearCoinRecords()
     coinSnapshotInitialized = false
     knownCollectedPointIds = new Set()
     return
   }
-  const missingAssetIds = [...new Set(points.map(point => String(point.rewardType || '').toUpperCase() === 'DIAMOND' ? DIAMOND_ASSET_ID : COIN_ASSET_ID))]
+  const missingAssetIds = [...new Set(points.map(point => {
+    const rewardType = String(point.rewardType || '').toUpperCase()
+    if (rewardType === 'DIAMOND') return DIAMOND_ASSET_ID
+    if (rewardType === TROPHY_REWARD_TYPE) return TROPHY_ASSET_ID
+    return COIN_ASSET_ID
+  }))]
     .filter(assetId => !modelTemplates.has(assetId))
   if (missingAssetIds.length) {
     Promise.all(missingAssetIds.map(ensureRewardTemplate)).then(() => updateRoutes())
@@ -967,6 +1182,7 @@ function createModelRecord(device, coordinate) {
   const effects = createModelEffects(type, device.deviceId, coordinate)
   const vehicleBeacon = type === 'ground_vehicle' && modelPresentation.warningBeacon ? addVehicleBeacon(group, groundedBox.max.z - groundedBox.min.z) : null
   const vehicleDock = type === 'ground_vehicle' && modelPresentation.visibleDroneDock ? addVehicleDroneDock(group, modelPresentation.compatibilityDock) : null
+  const emergencyLightbar = type === 'pace_vehicle' && modelPresentation.emergencyLightbar ? createEmergencyLightbar(object) : null
   const dockVisualBottom = type === 'smart_drone' ? primaryMeshBottom(object) : 0
   group.traverse(node => {
     if (node.isMesh) node.addEventListener('click', event => selectDeviceForFollow(device.deviceId, event))
@@ -983,7 +1199,7 @@ function createModelRecord(device, coordinate) {
     sampler: null, heading: 0, currentHeading: 0, emphasized: true, selected: false, phase: 'DOCKED',
     phaseChangedAt: performance.now(),
     forwardAxis: modelPresentation.forwardAxis, displayScale: 1, lastFrameAt: performance.now(),
-    mixer, animationAction, effects, vehicleBeacon, vehicleDock, dockVisualBottom, deliveryActive: false
+    mixer, animationAction, effects, vehicleBeacon, vehicleDock, emergencyLightbar, dockVisualBottom, deliveryActive: false
   }
   modelRecords.set(device.deviceId, record)
   return record
@@ -1074,6 +1290,7 @@ function removeModelRecord(id) {
     record.effects.scanRange?.geometry?.dispose?.(); record.effects.scanRange?.material?.dispose?.()
     record.vehicleDock?.deck.geometry.dispose(); record.vehicleDock?.ring.geometry.dispose()
     record.vehicleDock?.deckMaterial.dispose(); record.vehicleDock?.ringMaterial.dispose()
+    record.emergencyLightbar?.glows.forEach(({ material }) => material.dispose())
   }
   modelRecords.delete(id)
 }
@@ -1100,7 +1317,9 @@ function animateCoins(now) {
     const near = actorDistance <= Number(record.point.triggerRadiusMeters || (record.point.kind === 'AIR' ? 20 : 14)) * 1.8
     const spinBoost = !reduced && near ? 1.35 : 1
     const pickupSpin = record.pickupAt && !reduced ? 1 + pickupRatio * 5 : 1
-    const spinSpeed = record.isDiamond ? DIAMOND_SPIN_RADIANS_PER_SECOND : COIN_SPIN_RADIANS_PER_SECOND
+    const spinSpeed = record.isDiamond
+      ? DIAMOND_SPIN_RADIANS_PER_SECOND
+      : record.isTrophy ? TROPHY_SPIN_RADIANS_PER_SECOND : COIN_SPIN_RADIANS_PER_SECOND
     if (!reduced) record.spinRoot.rotation.z += Math.min(.05, Math.max(0, (now - record.lastFrameAt) / 1000)) * spinSpeed * spinBoost * pickupSpin
     record.lastFrameAt = now
     const pickupScale = record.pickupAt
@@ -1112,18 +1331,19 @@ function animateCoins(now) {
       material.opacity = Number(material.userData.rewardBaseOpacity ?? 1) * opacity
     })
     record.halo.position.copy(record.group.position); record.halo.position.z += bob + pickupLift
-    record.halo.scale.setScalar(Math.min(record.worldCap * (record.isDiamond ? 2.65 : 2.15), worldUnitsPerPixel * (record.targetPixels + (record.isDiamond ? 46 : 30))) * (record.pickupAt ? 1 + pickupRatio * .45 : 1))
-    record.halo.material.opacity = (record.isDiamond ? .68 : record.point.kind === 'AIR' ? .34 : .46) * (near && !reduced ? 1.35 : 1) * opacity
+    record.halo.scale.setScalar(Math.min(record.worldCap * (record.isDiamond ? 2.65 : record.isTrophy ? 2.5 : 2.15), worldUnitsPerPixel * (record.targetPixels + (record.isDiamond ? 46 : record.isTrophy ? 48 : 30))) * (record.pickupAt ? 1 + pickupRatio * .45 : 1))
+    record.halo.material.opacity = (record.isDiamond ? .68 : record.isTrophy ? .7 : record.point.kind === 'AIR' ? .34 : .46) * (near && !reduced ? 1.35 : 1) * opacity
     const ringCoordinate = [record.coordinate[0], record.coordinate[1], record.point.kind === 'AIR' ? record.coordinate[2] : .42]
     record.ring.position.fromArray(engine.map.projectArrayCoordinate(ringCoordinate, []))
-    const ringSize = Math.min(record.worldCap * .75, Math.max(.7, worldUnitsPerPixel * (record.targetPixels * .55)))
+    const ringSize = Math.min(record.worldCap * (record.isTrophy ? .82 : .75), Math.max(.7, worldUnitsPerPixel * (record.targetPixels * (record.isTrophy ? .64 : .55))))
     const ringPulse = reduced ? 1 : 1 + Math.sin(now * .003 + record.createdAt) * .06
     record.ring.scale.setScalar(ringSize * ringPulse)
-    record.ring.material.opacity = (record.isDiamond ? .25 : record.point.kind === 'AIR' ? .12 : .26) * (near && !reduced ? 1.35 : 1) * opacity
+    record.ring.material.opacity = (record.isDiamond ? .25 : record.isTrophy ? .44 : record.point.kind === 'AIR' ? .12 : .26) * (near && !reduced ? 1.35 : 1) * opacity
   })
 }
 function updateModels() {
   const now = performance.now()
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
   animateAirspace(now)
   syncTrafficLightNodes()
   syncTrafficLightVisibility()
@@ -1202,6 +1422,7 @@ function updateModels() {
       record.vehicleBeacon.cyan.opacity = .36 + beaconWave * .62
       record.vehicleBeacon.amber.opacity = .36 + (1 - beaconWave) * .62
     }
+    updateEmergencyLightbar(record, now, reducedMotion)
   })
   // Baseline logistics tasks keep the carried UAV in a compatibility pose relative
   // to the current ground model. No visible pad is added to the tricycle and
@@ -1290,7 +1511,12 @@ function createAirspaceVisual(volume) {
   sideLines.computeLineDistances(); sideLines.renderOrder = AIRSPACE_RENDER_ORDER + 4
   const scan = new THREE.Mesh(new THREE.ShapeGeometry(shape), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .08, side: THREE.DoubleSide, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending }))
   scan.renderOrder = AIRSPACE_RENDER_ORDER + 3
-  ;[ground, walls, lowerLine, upperLine, sideLines, scan].forEach(object => { object.frustumCulled = false })
+  const selectVisualAirspace = event => selectAirspaceFromMap(volume.logicalVolumeId || volume.id, event)
+  ;[ground, walls, lowerLine, upperLine, sideLines, scan].forEach(object => {
+    object.frustumCulled = false
+    object.addEventListener('click', selectVisualAirspace)
+  })
+  projection.addEventListener?.('click', selectVisualAirspace)
   group.add(ground, walls, lowerLine, upperLine, sideLines, scan); engine.add(group)
   const visual = { group, projection, ground, walls, lowerLine, upperLine, sideLines, scan, volume, height: upperLocal[0].z - lower.points[0].z }
   airspaceVisuals.set(String(volume.id), visual)
@@ -1352,19 +1578,23 @@ function animateAirspace(now) {
 }
 function createRouteVisual(route) {
   const air = route.kind === 'AIR'
+  const routeColor = route.color || (air ? '#a989ff' : route.kind === 'PACE' ? '#f7f8ff' : '#46dff2')
   // MapV Three 1.6.x 的 Polyline 材质没有公开动画参数代理；把这些
   // 参数交给构造器或对象代理都会落到 THREE.ShaderMaterial 并产生
   // unknown-property 警告，因此路线只使用当前版本稳定支持的样式。
   const planned = engine.add(new mapvthree.Polyline({
     flat: false,
-    color: air ? '#a989ff' : '#46dff2',
-    emissive: air ? '#7b4dff' : '#00a9d4',
+    color: routeColor,
+    emissive: routeColor,
     lineWidth: air ? 2.5 : 2,
     opacity: .48,
     dashed: true,
     dashArray: air ? 34 : 26,
     dashRatio: .55
   }))
+  if (route.kind === 'GROUND_CANDIDATE') planned.addEventListener?.('click', event => {
+    event?.stopPropagation?.(); emit('select-baseline', String(route.candidateId))
+  })
   planned.height = air ? 0 : .1
 
   const actual = engine.add(new mapvthree.Polyline({
@@ -1389,7 +1619,16 @@ function updateRoutes() {
   // 将待命设备永久固化成 fallbackModel() 的程序化模型。
   if (!engine || !hitLayer || !modelTemplates) return
   const routeIds = new Set(), latest = new Map(), viewportPoints = [], highlighted = pairDeviceIds()
-  ;(props.mission.routes || []).forEach(route => {
+  const selectedCandidateId = String(props.selectedBaselineId || props.mission?.groundRouting?.baselineRouteCandidateId || '')
+  const availableCandidates = Array.isArray(props.mission?.routeCandidates) ? props.mission.routeCandidates : []
+  // Once a task starts, the selected candidate is already the authoritative
+  // ground route in mission.routes. Drawing it again as a candidate produces a
+  // duplicate coloured solid line over the runtime route.
+  const visibleCandidates = props.planningPreview ? availableCandidates : []
+  const candidateRoutes = visibleCandidates
+    .map(candidate => ({ ...candidate, kind: 'GROUND_CANDIDATE', deviceId: candidate.candidateId }))
+  ;[...(props.mission.routes || []), ...candidateRoutes].forEach(route => {
+    const candidateOverlay = route.kind === 'GROUND_CANDIDATE'
     routeIds.add(route.deviceId)
     const visual = routeLayers.get(route.deviceId) || createRouteVisual(route)
     // TaskInstance 中的航点折线既是计划展示，也是仿真内核的执行依据。
@@ -1433,8 +1672,15 @@ function updateRoutes() {
     const conflictSignature = conflictSegments.map(coordinateSignature).join('||')
     if (visual.conflictSignature !== conflictSignature) { visual.conflict.dataSource = multiLineSource(conflictSegments, `${route.deviceId}-airspace-conflict`); visual.conflictSignature = conflictSignature }
     visual.conflict.visible = layers.airspace && conflictSegments.length > 0
-    visual.planned.visible = layers.planned && planned.length > 1; visual.actual.visible = hasSimulation.value && layers.actual && actual.length > 1
-    const emphasized = !highlighted.size || highlighted.has(route.deviceId); visual.planned.opacity = emphasized ? .5 : .16; visual.actual.opacity = emphasized ? .98 : .28
+    visual.planned.visible = layers.planned && planned.length > 1 && route.kind !== 'PACE'; visual.actual.visible = !candidateOverlay && route.kind !== 'PACE' && hasSimulation.value && layers.actual && actual.length > 1
+    const candidateSelected = candidateOverlay && String(route.candidateId) === selectedCandidateId
+    const emphasized = candidateOverlay ? candidateSelected || !props.selectedBaselineId : (!highlighted.size || highlighted.has(route.deviceId))
+    visual.planned.dashed = candidateOverlay ? !candidateSelected : route.selectedBaseline !== true
+    const runtimeGroundColor = !props.planningPreview && route.kind === 'GROUND' ? '#46dff2' : route.color || (route.kind === 'AIR' ? '#a989ff' : '#46dff2')
+    visual.planned.color = runtimeGroundColor
+    visual.planned.emissive = runtimeGroundColor
+    visual.planned.opacity = candidateOverlay ? candidateSelected ? .98 : .28 : emphasized ? .5 : .16; visual.actual.opacity = emphasized ? .98 : .28
+    if (candidateOverlay) { viewportPoints.push(...planned); return }
     const routeDevice = props.devices.find(device => device.deviceId === route.deviceId)
     const independentAir = route.kind === 'AIR'
       && routeDevice
@@ -1488,6 +1734,26 @@ function updateRoutes() {
     if (!state.coordinate.every(Number.isFinite)) return
     deviceIds.add(device.deviceId); updateModelTarget(device, state, !highlighted.size || highlighted.has(device.deviceId)); hitPoints.push({ deviceId: device.deviceId, coordinate: state.coordinate })
   })
+  const paceVehicle = props.mission?.paceVehicle
+  const paceCoordinate = coordinates([paceVehicle?.position], .3)[0]
+  const paceDevice = paceDeviceForMission()
+  if (advancedRunning.value && paceCoordinate && paceDevice) {
+    const paceSampler = createPolylineSampler(coordinates(paceVehicle.routePoints, .3))
+    const paceProgress = paceSampler.total > 0
+      ? Math.max(0, Math.min(1, Number(paceVehicle.distanceAlongRouteMeters || 0) / paceSampler.total))
+      : 0
+    const routeState = paceSampler.locate(paceProgress)
+    const status = String(paceVehicle.status || 'WAITING').toUpperCase()
+    deviceIds.add(paceDevice.deviceId)
+    updateModelTarget(paceDevice, {
+      coordinate: paceCoordinate,
+      heading: routeState.heading,
+      progress: paceProgress,
+      sampler: paceSampler.total > 0 ? paceSampler : null,
+      phase: status === 'RUNNING' ? 'TRANSIT' : status === 'ARRIVED' ? 'DELIVERED' : 'DOCKED',
+      deliveryActive: status === 'RUNNING'
+    }, true)
+  }
   modelRecords.forEach((_, id) => { if (!deviceIds.has(id)) removeModelRecord(id) })
   const hitSignature = pointSignature(hitPoints)
   if (pointLayerSignatures.hit !== hitSignature) { hitLayer.dataSource = pointSource(hitPoints); pointLayerSignatures.hit = hitSignature }
@@ -1505,20 +1771,58 @@ function updateRoutes() {
   if (trafficLightLayer) trafficLightLayer.visible = layers.traffic && liveLights.length > 0
   syncCoinRecords()
   const missionPoints = []
+  if (advancedRunning.value && paceCoordinate) {
+    const departureSeconds = Math.max(0, Math.ceil(Number(paceVehicle?.departureCountdownSeconds || 0)))
+    const paceLabel = departureSeconds > 0
+      ? `合同监管车 · 等待出发 ${departureSeconds} 秒`
+      : paceVehicle?.status === 'ARRIVED' ? '合同监管车 · 已到达终点' : '合同监管车 · 合同计时中'
+    missionPoints.push({ id: 'mission-pace-vehicle', kind: 'PACE', label: paceLabel, coordinate: paceCoordinate })
+  }
   const deliveryTargets = Array.isArray(props.mission?.deliveryPoints) ? props.mission.deliveryPoints : props.mission?.deliveryTargets || []
+  const collectedDeliveryTargetIds = new Set((props.mission?.economy?.collectedDeliveryPointIds || []).map(String))
   const deliveryNumbers = { GROUND: 0, AIR: 0 }
   deliveryTargets.forEach((target, index) => {
+    const targetId = String(target.id || `target-${index + 1}`)
     const kind = target.kind === 'AIR' ? 'AIR' : 'GROUND'
     const ordinal = ++deliveryNumbers[kind]
+    if (collectedDeliveryTargetIds.has(targetId)) return
     const coordinate = coordinates([target.position || target.coordinate], kind === 'AIR' ? 70 : .6)[0]
     const amount = target.rewardMinor ? ` · ¥${Math.round(Number(target.rewardMinor) / 100).toLocaleString('zh-CN')}` : ''
-    if (coordinate) missionPoints.push({ id: String(target.id || `target-${index + 1}`), kind: 'TARGET', label: `${kind === 'AIR' ? '无人机配送点' : '车辆配送点'} ${ordinal}${amount}`, coordinate })
+    const selectedBaseline = String(props.selectedBaselineId || props.mission?.groundRouting?.baselineRouteCandidateId || '')
+    const outsideSelected = kind === 'GROUND' && selectedBaseline && Array.isArray(target.eligibleCandidateIds) && !target.eligibleCandidateIds.map(String).includes(selectedBaseline)
+    // Do not place permanent text cards beside rewards. Advanced ground rewards
+    // retain an invisible DOM hit target so clicking the 3D coin/trophy area can
+    // still dispatch the vehicle and Tutorial 02 can still spotlight it.
+    const dispatchable = advancedRunning.value && kind === 'GROUND'
+    if (coordinate && dispatchable) missionPoints.push({ id: targetId, kind: 'TARGET', label: `${outsideSelected && props.mission?.tutorialId ? '教程绕行奖励' : target.rewardType === 'GROUND_TROPHY' ? '地面奖杯' : '地面金币'} ${ordinal}${amount}`, coordinate, dispatchable })
   })
   const launchPoint = coordinates([props.mission?.launchPoint], 2.35)[0]
   const recoveryPoint = coordinates([props.mission?.recoveryPoint], 2.35)[0]
   if (launchPoint) missionPoints.push({ id: 'mission-launch', kind: 'LAUNCH', label: '无人机起飞点', coordinate: launchPoint })
   if (recoveryPoint) missionPoints.push({ id: 'mission-recovery', kind: 'RECOVERY', label: '无人机返航点', coordinate: recoveryPoint })
-  const nextMissionPointSignature = missionPoints.map(item => `${item.id}:${item.kind}:${item.coordinate.join(',')}`).join('|')
+  const temporaryTarget = props.mission?.groundRouting?.activeTemporaryTarget
+  const temporaryCoordinate = coordinates([temporaryTarget?.roadAnchor || temporaryTarget?.requestedPosition], .7)[0]
+  const vehicleCoordinate = coordinates([props.mission?.groundRouting?.authoritativePosition], .42)[0]
+  const activeGroundRoute = coordinates(props.mission?.groundRouting?.activeRemainingPoints, .42)
+  const connectorPoints = advancedRunning.value && temporaryTarget && temporaryTarget.reached !== true
+    && vehicleCoordinate && temporaryCoordinate
+    ? remainingRouteToTarget(activeGroundRoute, props.mission?.groundRouting?.distanceAlongActiveMeters,
+      temporaryCoordinate, vehicleCoordinate).map(point => [point[0], point[1], .42])
+    : []
+  const nextDispatchConnectorSignature = coordinateSignature(connectorPoints)
+  if (dispatchConnectorLayer && dispatchConnectorSignature !== nextDispatchConnectorSignature) {
+    dispatchConnectorLayer.dataSource = lineSource(connectorPoints, 'active-ground-dispatch-connector')
+    dispatchConnectorSignature = nextDispatchConnectorSignature
+  }
+  if (dispatchConnectorLayer) dispatchConnectorLayer.visible = connectorPoints.length > 1
+  if (temporaryCoordinate && temporaryTarget?.reached !== true) missionPoints.push({
+    id: 'active-ground-dispatch', kind: 'DISPATCH',
+    label: temporaryTarget?.targetId ? '当前奖励调度目标' : '当前地图调度目标',
+    coordinate: temporaryCoordinate
+  })
+  const nextMissionPointSignature = missionPoints
+    .map(item => `${item.id}:${item.kind}:${item.label}:${item.dispatchable === true}:${item.coordinate.join(',')}`)
+    .join('|')
   if (missionPointLayer && missionPointSignature !== nextMissionPointSignature) {
     missionPointLayer.dataSource = missionPointSource(missionPoints)
     missionPointSignature = nextMissionPointSignature
@@ -1554,6 +1858,16 @@ async function initMap() {
   mapView = engine.add(new mapvthree.MapView({ terrainProvider: null, vectorProvider: provider }))
   hitLayer = engine.add(new mapvthree.EffectPoint({ type: 'RadarLayered', color: '#00e9ff', sideColor: '#34f5c5', size: 30, height: 1, duration: 1600, keepSize: true, opacity: .18 }))
   pickLayer = engine.add(new mapvthree.EffectModelPoint({ normalize: true, rotateToZUp: false, keepSize: true, size: 38, height: 1, animationRotate: false }))
+  dispatchConnectorLayer = engine.add(new mapvthree.Polyline({
+    flat: false,
+    color: '#ffb347',
+    emissive: '#ff8a1f',
+    lineWidth: 3.5,
+    opacity: .96,
+    dashed: false
+  }))
+  dispatchConnectorLayer.height = .42
+  dispatchConnectorLayer.visible = false
   missionPointLayer = engine.add(new mapvthree.DOMPoint({ offset: [-16, -16] }))
   missionPointLayer.renderItem = renderMissionPoint
   rewardPopupLayer = engine.add(new mapvthree.DOMPoint({ offset: [-34, -58] }))
@@ -1577,11 +1891,31 @@ async function initMap() {
   pickLayer.addEventListener('mouseleave', () => { if (mapEl.value) mapEl.value.style.cursor = '' })
   engine.map.addEventListener('click', event => {
     const deviceId = deviceAtMapPixel(event?.pixel)
-    if (deviceId) selectDeviceForFollow(deviceId, event)
+    if (deviceId) { selectDeviceForFollow(deviceId, event); return }
+    if (Date.now() - lastMapOverlayInteractionAt < 500) return
+    if (!advancedRunning.value || lastPointerWasDrag) { lastPointerWasDrag = false; return }
+    // MapV Three exposes the unprojected geographic coordinate as `point`.
+    // `position` is a projected world coordinate and cannot be sent to the
+    // routing API directly; older aliases are retained for compatibility.
+    const source = event?.point || event?.coordinate || event?.lnglat || event?.latlng
+    const longitude = Number(Array.isArray(source) ? source[0] : source?.lng ?? source?.longitude)
+    const latitude = Number(Array.isArray(source) ? source[1] : source?.lat ?? source?.latitude)
+    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) return
+    const selectedAirspace = visibleAirspaceAtCoordinate(longitude, latitude)
+    if (selectedAirspace) {
+      emit('select-airspace', String(selectedAirspace.id || ''))
+      return
+    }
+    emit('dispatch-map-point', [longitude, latitude, .35])
   })
   resizeObserver = new ResizeObserver(() => engine?.requestRender()); resizeObserver.observe(mapEl.value)
   modelTemplates = new Map()
-  await Promise.all([loadAssignedModelTemplates(), ensureRewardTemplate(COIN_ASSET_ID), ensureRewardTemplate(DIAMOND_ASSET_ID)])
+  await Promise.all([
+    loadAssignedModelTemplates(),
+    ensureRewardTemplate(COIN_ASSET_ID),
+    ensureRewardTemplate(DIAMOND_ASSET_ID),
+    ensureRewardTemplate(TROPHY_ASSET_ID)
+  ])
   prepareRenderListener = updateModels; engine.addPrepareRenderListener(prepareRenderListener)
   updateRoutes(); mapLoading.value = false
 }
@@ -1611,6 +1945,24 @@ function showMissionOverview() {
     })
   }
 }
+function showPaceVehicleCloseup() {
+  if (!engine) return false
+  const pace = props.mission?.paceVehicle
+  const coordinate = coordinates([pace?.position], 1.1)[0]
+  if (!coordinate) return false
+  const sampler = createPolylineSampler(coordinates(pace?.routePoints, .3))
+  const progress = sampler.total > 0
+    ? Math.max(0, Math.min(1, Number(pace?.distanceAlongRouteMeters || 0) / sampler.total))
+    : 0
+  const camera = missionFollowCamera('pace_vehicle', sampler.locate(progress).heading, 'side')
+  followingId.value = ''
+  followZoomScale = 1
+  engine.map.flyTo(coordinate, {
+    ...camera,
+    duration: 720
+  })
+  return true
+}
 function leaveFollow() {
   const contextWillRestoreOverview = Boolean(props.selectedId)
   followingId.value = ''
@@ -1621,8 +1973,9 @@ function leaveFollow() {
 function onMapPointerDown(event) {
   if (event.button !== undefined && event.button !== 0) return
   mapDragging = true
+  pointerStart = [Number(event.clientX || 0), Number(event.clientY || 0)]
+  lastPointerWasDrag = false
   if (followingId.value) { followingId.value = ''; followZoomScale = 1 }
-  if (mapView) mapView.freezeUpdate = true
 }
 function remapMapRotationPointerDown(event) {
   if (!event.isTrusted) return
@@ -1657,10 +2010,15 @@ function remapMapRotationPointerDown(event) {
 }
 function preventMapContextMenu(event) { event.preventDefault() }
 function preventMapAuxiliaryClick(event) { if (event.button === 1) event.preventDefault() }
+function onMapPointerMove(event) {
+  if (!mapDragging || !pointerStart) return
+  const threshold = Math.max(1, Number(props.mission?.groundRoutingLimits?.pointerMovePixels || 6))
+  if (Math.hypot(Number(event.clientX || 0) - pointerStart[0], Number(event.clientY || 0) - pointerStart[1]) > threshold) lastPointerWasDrag = true
+}
 function onMapPointerUp() {
   if (!mapDragging) return
   mapDragging = false
-  if (mapView) mapView.freezeUpdate = false
+  pointerStart = null
   engine?.requestRender()
 }
 function onFollowWheel(event) {
@@ -1670,8 +2028,12 @@ function onFollowWheel(event) {
   followZoomScale = adjustFollowZoomScale(followZoomScale, event.deltaY)
   engine?.requestRender()
 }
-function onKeydown(event) { if (event.key === 'Escape' && followingId.value) leaveFollow() }
-watch([() => props.devices, () => props.mission, () => props.selectedId, () => props.selectedAirspaceId, () => props.tutorialRedConflictLocked, layers, replayPercent], updateRoutes, { deep: true })
+function onKeydown(event) {
+  if (event.key !== 'Escape') return
+  if (props.mission?.groundRouting?.activeTemporaryTarget) { emit('return-ground-baseline'); return }
+  if (followingId.value) leaveFollow()
+}
+watch([() => props.devices, () => props.mission, () => props.selectedId, () => props.selectedAirspaceId, () => props.selectedBaselineId, () => props.tutorialRedConflictLocked, layers, replayPercent], updateRoutes, { deep: true })
 watch(() => props.modelAssignments, () => { refreshAssignedModels() }, { deep: true })
 watch(() => props.mission?.taskId || props.mission?.scenarioTemplateId || props.mission?.simulationId, () => {
   fitted = false
@@ -1687,6 +2049,13 @@ watch(() => props.selectedId, (deviceId) => {
     followingId.value = deviceId
   }
 })
+watch(() => props.tutorialCameraTarget, target => {
+  if (target === 'pace') {
+    showPaceVehicleCloseup()
+    return
+  }
+  showMissionOverview()
+})
 watch(() => props.timeCursor, value => {
   if (isReplay.value && props.timeMode === 'REPLAY') replayPercent.value = Math.max(0, Math.min(100, Number(value) || 0))
 }, { immediate: true })
@@ -1695,8 +2064,9 @@ watch(isReplay, value => {
 })
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
-  window.addEventListener('pointerup', onMapPointerUp)
-  window.addEventListener('pointercancel', onMapPointerUp)
+  window.addEventListener('pointerup', onMapPointerUp, true)
+  window.addEventListener('pointermove', onMapPointerMove)
+  window.addEventListener('pointercancel', onMapPointerUp, true)
   window.addEventListener('blur', onMapPointerUp)
   mapEl.value?.addEventListener('pointerdown', remapMapRotationPointerDown, { capture: true })
   mapEl.value?.addEventListener('pointerdown', onMapPointerDown)
@@ -1707,8 +2077,9 @@ onMounted(() => {
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
-  window.removeEventListener('pointerup', onMapPointerUp)
-  window.removeEventListener('pointercancel', onMapPointerUp)
+  window.removeEventListener('pointerup', onMapPointerUp, true)
+  window.removeEventListener('pointermove', onMapPointerMove)
+  window.removeEventListener('pointercancel', onMapPointerUp, true)
   window.removeEventListener('blur', onMapPointerUp)
   mapEl.value?.removeEventListener('pointerdown', remapMapRotationPointerDown, true)
   mapEl.value?.removeEventListener('pointerdown', onMapPointerDown)
@@ -1721,7 +2092,7 @@ onUnmounted(() => {
   Array.from(modelRecords.keys()).forEach(removeModelRecord)
   routeLayers.clear(); routeSamplers.clear(); airspaceVisuals.forEach(disposeAirspaceVisual); airspaceVisuals.clear()
   glowTexture?.dispose(); glowTexture = null
-  engine?.dispose(); engine = null; mapView = null; missionPointLayer = null; missionPointSignature = ''; rewardPopupLayer = null; trafficLightLayer = null; trafficLightStructureSignature = ''
+  engine?.dispose(); engine = null; mapView = null; missionPointLayer = null; missionPointSignature = ''; dispatchConnectorLayer = null; dispatchConnectorSignature = ''; rewardPopupLayer = null; trafficLightLayer = null; trafficLightStructureSignature = ''
   airspaceLabelLayer = null; conflictLabelLayer = null; airspaceStructureSignature = ''; airspaceLabelSignature = ''; conflictLabelSignature = ''
   conflictAttentionStartedAt.clear(); viewedConflictKeys.clear()
   liveTrafficLights = []; trafficLightRenderedStateSignature = ''; trafficLightRenderedNode = null
@@ -1745,15 +2116,20 @@ onUnmounted(() => {
 .map-canvas :deep(.traffic-signal-arrow) { font:900 14px/1 Arial,sans-serif; text-shadow:0 1px 1px rgba(255,255,255,.22); transform:translateY(-.5px); }
 .map-canvas :deep(.traffic-signal-countdown) { display:block; flex:1; min-width:0; margin-left:5px; border-left:1px solid rgba(255,255,255,.11); color:var(--lamp); font:800 19px/20px "DIN Alternate","Arial Narrow",Arial,sans-serif; font-variant-numeric:tabular-nums; letter-spacing:-.5px; text-align:center; text-shadow:0 0 6px color-mix(in srgb,var(--lamp),transparent 42%); }
 .map-canvas :deep(.mission-point-marker) { --marker:#56ecff; display:flex; align-items:center; gap:6px; white-space:nowrap; pointer-events:none; filter:drop-shadow(0 2px 4px rgba(0,0,0,.7)); }
+.map-canvas :deep(.mission-point-marker[role="button"]) { appearance:none; padding:0; border:0; color:inherit; background:transparent; cursor:pointer; pointer-events:auto; }
+.map-canvas :deep(.mission-point-marker[role="button"]:focus-visible) { outline:2px solid var(--marker); outline-offset:3px; }
 .map-canvas :deep(.mission-point-icon) { display:grid; width:28px; height:28px; place-items:center; border:1px solid color-mix(in srgb,var(--marker),white 20%); border-radius:50%; color:#03131c; background:var(--marker); box-shadow:0 0 16px color-mix(in srgb,var(--marker),transparent 35%); font:900 15px/1 sans-serif; }
-.map-canvas :deep(.mission-point-label) { padding:4px 7px; border:1px solid color-mix(in srgb,var(--marker),transparent 45%); border-radius:3px; color:#e9fbff; background:rgba(3,18,29,.9); font:600 10px/1.2 sans-serif; }
-.map-canvas :deep(.mission-point-marker.is-launch) { --marker:#44f0a8; }.map-canvas :deep(.mission-point-marker.is-recovery) { --marker:#ffd166; }.map-canvas :deep(.mission-point-marker.is-target) { --marker:#d277ff; }.map-canvas :deep(.mission-point-marker.is-target .mission-point-label) { margin-left:34px; }
+.map-canvas :deep(.mission-point-marker.is-launch) { --marker:#44f0a8; }.map-canvas :deep(.mission-point-marker.is-recovery) { --marker:#ffd166; }.map-canvas :deep(.mission-point-marker.is-target) { --marker:#d277ff; width:44px; height:44px; margin:-8px; border-radius:50%; filter:none; }.map-canvas :deep(.mission-point-marker.is-dispatch) { --marker:#ffb84d; }
+.map-canvas :deep(.mission-point-marker.is-pace){--marker:#ffce68;position:relative;z-index:3;align-items:center;transform:translate(-2px,-42px);filter:drop-shadow(0 3px 7px rgba(0,0,0,.82))}.map-canvas :deep(.mission-point-marker.is-pace .mission-point-icon){border-width:2px;color:#241700;background:#ffce68;box-shadow:0 0 0 4px rgba(255,206,104,.12),0 0 22px rgba(255,190,66,.72)}.map-canvas :deep(.mission-point-marker.is-pace .mission-point-label){padding:6px 9px;border:1px solid rgba(255,206,104,.62);border-left:2px solid #ffce68;border-radius:2px;color:#fff2c9;background:rgba(28,20,5,.94);box-shadow:0 8px 22px rgba(0,0,0,.52);font:750 10px/1.2 sans-serif;letter-spacing:.04em}.map-canvas :deep(.mission-point-marker.is-pace.tutorial-target-active){filter:drop-shadow(0 0 10px rgba(255,210,112,.9));animation:pace-tutorial-pulse 1.25s ease-in-out infinite}
 .map-canvas :deep(.coin-reward-popup){padding:5px 9px;border:1px solid rgba(255,222,104,.72);border-radius:999px;color:#fff4a6;background:rgba(48,35,4,.9);box-shadow:0 0 20px rgba(255,200,45,.42);font:800 13px/1.1 "DIN Alternate",sans-serif;white-space:nowrap;pointer-events:none;animation:coin-reward-rise 1.1s ease-out forwards}@keyframes coin-reward-rise{0%{opacity:0;transform:translateY(12px) scale(.86)}18%{opacity:1;transform:translateY(0) scale(1.06)}72%{opacity:1;transform:translateY(-12px) scale(1)}100%{opacity:0;transform:translateY(-25px) scale(.94)}}
 .map-canvas :deep(.coin-reward-popup.is-diamond){border-color:rgba(255,113,209,.82);color:#ffd2f3;background:rgba(57,4,43,.92);box-shadow:0 0 24px rgba(255,47,174,.58)}
+.map-canvas :deep(.coin-reward-popup.is-trophy){border-color:rgba(255,206,76,.9);color:#fff0a3;background:rgba(65,35,2,.94);box-shadow:0 0 26px rgba(255,171,22,.62)}
 .map-canvas :deep(.airspace-marker){--airspace:#ff496b;display:grid;gap:2px;min-width:84px;padding:5px 8px;border:1px solid color-mix(in srgb,var(--airspace),transparent 35%);border-radius:2px;color:#f8fbff;text-align:left;background:rgba(4,13,24,.82);box-shadow:0 0 15px color-mix(in srgb,var(--airspace),transparent 75%);backdrop-filter:blur(5px);cursor:pointer;pointer-events:auto;transform:translateY(-4px)}
 .map-canvas :deep(.airspace-marker b){color:var(--airspace);font:700 10px/1.1 "Arial Narrow",sans-serif;letter-spacing:.09em}.map-canvas :deep(.airspace-marker span){color:#a9bac7;font:8px/1.1 sans-serif;letter-spacing:.05em}.map-canvas :deep(.airspace-marker.is-temporary_no_fly){--airspace:#ff8a47}.map-canvas :deep(.airspace-marker.is-risk_airspace){--airspace:#ffd166}.map-canvas :deep(.airspace-marker.is-altitude_restricted),.map-canvas :deep(.airspace-marker.is-altitude_corridor){--airspace:#9a72ff}.map-canvas :deep(.airspace-marker.threat-imminent),.map-canvas :deep(.airspace-marker.threat-violation){animation:airspace-alert .85s ease-in-out infinite alternate}
 .map-canvas :deep(.airspace-marker.is-planning){border-width:2px;background:rgba(19,8,18,.94);box-shadow:0 0 22px color-mix(in srgb,var(--airspace),transparent 58%)}.map-canvas :deep(.airspace-marker.is-planning span){color:#f1dce3;font-weight:650}
 .map-canvas :deep(.airspace-conflict-marker){display:grid;gap:3px;min-width:132px;padding:8px 10px 7px;border:1px solid #ff4768;border-radius:3px;color:#fff;text-align:left;background:linear-gradient(135deg,rgba(62,7,23,.96),rgba(35,5,15,.93));box-shadow:0 0 22px rgba(255,38,77,.36);cursor:pointer;pointer-events:auto;transform-origin:50% 100%;transition:border-color var(--motion-fast),box-shadow var(--motion-fast),filter var(--motion-fast),transform var(--motion-fast)}.map-canvas :deep(.airspace-conflict-marker b){color:#ff8ca1;font:800 10px/1 sans-serif;letter-spacing:.08em}.map-canvas :deep(.airspace-conflict-marker span){font:700 11px/1.15 "Arial Narrow",sans-serif}.map-canvas :deep(.airspace-conflict-marker small){padding-top:3px;border-top:1px solid rgba(255,139,161,.22);color:#ffd1da;font:700 9px/1.1 sans-serif;letter-spacing:.04em}.map-canvas :deep(.airspace-conflict-marker:hover),.map-canvas :deep(.airspace-conflict-marker:focus-visible){border-color:#ff9eb0;filter:brightness(1.12);box-shadow:0 0 0 2px rgba(255,110,139,.18),0 0 30px rgba(255,38,77,.54);outline:none;transform:translateY(-2px) scale(1.035)}.map-canvas :deep(.airspace-conflict-marker.is-click-inviting:not(.is-viewed)){animation:conflict-card-invite 1.2s ease-in-out 3}.map-canvas :deep(.airspace-conflict-marker.tutorial-target-active){animation:tutorial-conflict-invite .9s ease-in-out 3,tutorial-conflict-breathe 2.4s ease-in-out 2.7s infinite;box-shadow:0 0 0 1px rgba(255,138,166,.32),0 0 28px rgba(255,38,91,.66)}
+.ground-routing-hud{position:absolute;left:calc(50% + 130px);bottom:108px;z-index:12;display:grid;gap:5px;min-width:300px;padding:12px 15px;border:1px solid rgba(57,230,255,.35);color:#eaffff;background:rgba(3,18,28,.92);box-shadow:0 14px 40px rgba(0,0,0,.42);transform:translateX(-50%);pointer-events:auto}.ground-routing-hud>span{color:#54e8ff;font-size:.57rem;font-weight:800;letter-spacing:.14em}.ground-routing-hud>strong{font-size:.75rem}.ground-routing-hud>small{color:#9db8bf;font-size:.62rem}.ground-routing-hud button{justify-self:start;margin-top:3px;padding:6px 9px;border:1px solid rgba(126,240,196,.28);color:var(--signal-mint);background:rgba(20,70,65,.3);font-size:.61rem}.ground-routing-hud kbd{margin-left:5px;color:#d7e8eb;background:transparent}
+.ground-routing-hud .tutorial-ground-hint{max-width:360px;padding-top:5px;border-top:1px solid rgba(255,209,102,.2);color:#ffe29a;line-height:1.5}
 @keyframes airspace-alert{to{box-shadow:0 0 28px color-mix(in srgb,var(--airspace),transparent 32%);transform:translateY(-4px) scale(1.05)}}
 @keyframes conflict-card-invite{0%,100%{filter:brightness(1);transform:scale(1)}48%{filter:brightness(1.16);box-shadow:0 0 0 3px rgba(255,89,121,.14),0 0 32px rgba(255,38,77,.62);transform:scale(1.045)}}
 @keyframes tutorial-conflict-invite{0%,100%{filter:brightness(1);transform:scale(1)}50%{filter:brightness(1.18);transform:scale(1.06)}}
@@ -1766,11 +2142,12 @@ onUnmounted(() => {
 .traffic-status.is-ready { border-color:rgba(57,245,154,.5); color:#8fffc6; }.traffic-status.is-disabled,.traffic-status.is-degraded{border-color:rgba(255,83,104,.52);color:#ff8e9d}.traffic-status.is-empty{color:#9dafb9}
 .planning-airspace-status{position:absolute;z-index:13;top:88px;left:50%;display:flex;align-items:center;gap:9px;min-width:176px;box-sizing:border-box;padding:7px 12px;border:1px solid rgba(255,72,101,.68);border-radius:3px;color:#ffe8ec;background:linear-gradient(90deg,rgba(63,8,25,.94),rgba(19,10,25,.9));box-shadow:0 0 26px rgba(255,50,86,.2);backdrop-filter:blur(8px);pointer-events:none;transform:translateX(-50%)}.planning-airspace-status>i{width:8px;height:8px;border:1px solid #ff9aaa;border-radius:50%;background:#ff3f64;box-shadow:0 0 12px #ff3f64;animation:planning-airspace-pulse 1.25s ease-in-out infinite}.planning-airspace-status>span{display:grid;gap:2px}.planning-airspace-status strong{font-size:10px;letter-spacing:.08em}.planning-airspace-status small{color:#c9aab3;font-size:8px}.planning-airspace-status.is-hidden{opacity:.58;filter:saturate(.35)}
 .map-legend { position:absolute; z-index:13; right:24px; bottom:104px; display:grid; grid-template-columns:repeat(2,auto); gap:7px 14px; padding:10px 12px; border:1px solid rgba(66,178,214,.28); border-radius:6px; color:#789aaa; background:rgba(3,14,23,.92); box-shadow:0 14px 35px rgba(0,0,0,.3); font-size:9px; }
-.map-legend i { display:inline-block; width:22px; margin-right:5px; border-top:2px dashed currentColor; vertical-align:middle; }.map-legend .ground-plan{color:#46dff2}.map-legend .ground-actual{color:#37f3cf;border-top-style:solid}.map-legend .air-plan{color:#a989ff}.map-legend .air-actual{color:#ef69ff;border-top-style:solid}.map-legend .no-fly{height:7px;border:1px solid #ff405f;background:rgba(255,64,95,.3)}.map-legend .reward-coin{width:9px;height:9px;border:1px solid #fff0a2;border-radius:50%;background:#e9a928;box-shadow:0 0 8px rgba(255,213,72,.65)}.map-legend .reward-diamond{width:9px;height:9px;border:1px solid #ffc3eb;background:#ff3eb5;box-shadow:0 0 11px rgba(255,55,183,.92);transform:rotate(45deg)}
+.map-legend i { display:inline-block; width:22px; margin-right:5px; border-top:2px dashed currentColor; vertical-align:middle; }.map-legend .ground-plan{color:#46dff2}.map-legend .ground-actual{color:#37f3cf;border-top-style:solid}.map-legend .air-plan{color:#a989ff}.map-legend .air-actual{color:#ef69ff;border-top-style:solid}.map-legend .no-fly{height:7px;border:1px solid #ff405f;background:rgba(255,64,95,.3)}.map-legend .reward-coin{width:9px;height:9px;border:1px solid #fff0a2;border-radius:50%;background:#e9a928;box-shadow:0 0 8px rgba(255,213,72,.65)}.map-legend .reward-trophy{position:relative;width:10px;height:8px;border:2px solid #ffd45a;border-top:0;border-radius:0 0 5px 5px;color:#ffd45a}.map-legend .reward-trophy::after{position:absolute;left:3px;top:7px;width:3px;height:4px;border-bottom:2px solid currentColor;content:''}.map-legend .reward-diamond{width:9px;height:9px;border:1px solid #ffc3eb;background:#ff3eb5;box-shadow:0 0 11px rgba(255,55,183,.92);transform:rotate(45deg)}
 @media(max-width:700px){.map-legend{right:14px;bottom:88px}}
 .follow-controls { position:absolute; z-index:14; top:88px; left:50%; display:flex; align-items:center; gap:5px; padding:4px 5px 4px 10px; border:1px solid rgba(0,204,232,.38); border-radius:999px; background:rgba(4,23,43,.84); backdrop-filter:blur(8px); transform:translateX(-50%); }
 .follow-controls span { max-width:145px; overflow:hidden; color:#8ec9dc; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }.follow-controls button{padding:5px 9px;border:1px solid rgba(73,166,195,.34);border-radius:999px;color:#9cc7d8;background:rgba(10,48,70,.64);font-size:11px;cursor:pointer}.follow-controls button.active{border-color:var(--signal-primary,#35e3f4);color:#efffff;background:rgba(22,94,119,.82)}.follow-controls .overview-button{border-color:rgba(255,209,102,.5);color:#fff2c2;background:rgba(67,49,17,.68)}.follow-controls kbd{margin-left:3px;color:#94aeb9;font:9px monospace}
 @media(max-width:1300px){.layer-switches,.traffic-status{left:215px}.follow-controls{left:46%;}}
 @keyframes planning-airspace-pulse{50%{opacity:.35;transform:scale(.72)}}
+@keyframes pace-tutorial-pulse{50%{filter:drop-shadow(0 0 17px rgba(255,218,132,1));transform:translate(-2px,-46px) scale(1.04)}}
 @media(prefers-reduced-motion:reduce){.mission-map *{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}.map-canvas :deep(.airspace-conflict-marker.tutorial-target-active){animation:none;filter:brightness(1.18);box-shadow:0 0 0 2px rgba(255,138,166,.62),0 0 24px rgba(255,38,91,.55)}}
 </style>

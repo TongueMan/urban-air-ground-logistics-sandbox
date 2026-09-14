@@ -65,6 +65,54 @@ export function createPolylineSampler(source = []) {
   return { points, total, locate, slice }
 }
 
+function projectOntoPolyline(points, target) {
+  if (!Array.isArray(target) || target.length < 2 || !target.every(value => Number.isFinite(Number(value)))) return null
+  let best = null
+  let distanceAlong = 0
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const from = points[index], to = points[index + 1]
+    const latitude = ((Number(from[1]) + Number(to[1]) + Number(target[1])) / 3) * Math.PI / 180
+    const longitudeScale = METERS_PER_DEGREE * Math.cos(latitude)
+    const ax = Number(from[0]) * longitudeScale, ay = Number(from[1]) * METERS_PER_DEGREE
+    const bx = Number(to[0]) * longitudeScale, by = Number(to[1]) * METERS_PER_DEGREE
+    const px = Number(target[0]) * longitudeScale, py = Number(target[1]) * METERS_PER_DEGREE
+    const dx = bx - ax, dy = by - ay
+    const ratio = Math.max(0, Math.min(1, dx * dx + dy * dy <= 1e-9 ? 0 : ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    const coordinate = [0, 1, 2].map(axis => Number(from[axis] || 0) + (Number(to[axis] || 0) - Number(from[axis] || 0)) * ratio)
+    const offsetMeters = horizontalDistanceMeters(coordinate, target)
+    const segmentMeters = distanceMeters(from, to)
+    const candidate = { coordinate, segment: index, distanceAlongMeters: distanceAlong + segmentMeters * ratio, offsetMeters }
+    if (!best || candidate.offsetMeters < best.offsetMeters) best = candidate
+    distanceAlong += segmentMeters
+  }
+  return best
+}
+
+/**
+ * Returns only the still-untravelled road geometry between a vehicle and its
+ * active temporary target. The target is projected onto the authoritative
+ * routing polyline so this never invents a straight cross-map shortcut.
+ */
+export function remainingRouteToTarget(source = [], startDistanceMeters = 0, target = null, currentPosition = null) {
+  const sampler = createPolylineSampler(source)
+  if (sampler.points.length < 2 || sampler.total <= 0) return []
+  const projection = projectOntoPolyline(sampler.points, target)
+  if (!projection) return []
+  const startDistance = Math.max(0, Math.min(sampler.total, Number(startDistanceMeters) || 0))
+  if (projection.distanceAlongMeters <= startDistance + .05) return []
+  const start = sampler.locate(startDistance / sampler.total)
+  const suppliedCurrent = Array.isArray(currentPosition) && currentPosition.length >= 2
+    && currentPosition.every(value => Number.isFinite(Number(value)))
+    ? currentPosition.map(Number)
+    : null
+  const result = [(suppliedCurrent || start.coordinate).slice()]
+  for (let index = start.segment + 1; index <= projection.segment; index += 1) {
+    if (distanceMeters(result.at(-1), sampler.points[index]) > .02) result.push(sampler.points[index].slice())
+  }
+  if (distanceMeters(result.at(-1), projection.coordinate) > .02) result.push(projection.coordinate.slice())
+  return result.length > 1 ? result : []
+}
+
 export function executableAirRouteFraction(sortieFraction, stagedTakeoffAndLanding = false) {
   const progress = Math.max(0, Math.min(1, Number(sortieFraction) || 0))
   if (!stagedTakeoffAndLanding) return progress

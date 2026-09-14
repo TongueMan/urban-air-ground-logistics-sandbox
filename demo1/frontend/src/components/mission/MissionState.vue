@@ -21,9 +21,14 @@
       </small>
     </div>
     <div class="mission-trigger">
-      <button v-if="!runtime.hasSession.value || runtime.isTerminal.value" class="start-button" :class="{ 'has-preview': runtime.taskPreview.value }" type="button" data-tutorial-id="create-mission" :disabled="runtime.busy.value" @click="runtime.openPlanner">
+      <button v-if="!missionInProgress && !runtime.advancedRoutingUnlocked.value" class="start-button" :class="{ 'has-preview': runtime.taskPreview.value }" type="button" data-tutorial-id="create-mission" :disabled="runtime.busy.value" @click="runtime.openPlanner">
         {{ runtime.taskPreview.value ? '继续配置配送任务' : '生成配送任务' }}
       </button>
+      <div v-else-if="!missionInProgress" class="delivery-split">
+        <button class="start-button split-main" type="button" data-tutorial-id="create-mission" :disabled="runtime.busy.value" aria-label="生成基础配送任务" @click="runtime.openPlannerMode('BASIC')">{{ runtime.taskPreview.value ? '继续配置配送任务' : '生成配送任务' }}</button>
+        <button class="start-button split-arrow" type="button" :aria-expanded="splitOpen" aria-label="选择配送玩法" @click="splitOpen = !splitOpen">⌄</button>
+        <div v-if="splitOpen" class="split-menu" role="menu"><button type="button" role="menuitem" @click="chooseMode('BASIC')">基础配送</button><button type="button" role="menuitem" @click="chooseMode('ADVANCED')">进阶规划</button></div>
+      </div>
       <button v-else class="control-button" type="button" data-tutorial-id="mission-control" @click="openMissionControl">任务控制</button>
       <button class="history-button" type="button" :disabled="runtime.busy.value" @click="runtime.openHistory">历史任务</button>
     </div>
@@ -42,8 +47,10 @@ const props = defineProps({
 const runtime = props.runtime
 const fleetRuntime = props.fleetRuntime
 const context = useMissionContext()
+const splitOpen = ref(false)
 const mission = computed(() => context.mission.value)
 const activePhase = computed(() => context.activePhase.value)
+const missionInProgress = computed(() => ['QUEUED', 'RUNNING'].includes(String(mission.value.status || '').toUpperCase()))
 const planning = computed(() => runtime.plannerOpen.value && context.timeMode.value !== 'REPLAY')
 const phaseLabel = computed(() => planning.value ? 'PLANNING' : context.timeMode.value === 'REPLAY' ? activePhase.value?.shortLabel || 'REPLAY' : mission.value.status === 'COMPLETED' ? 'COMPLETE' : activePhase.value?.shortLabel || 'STANDBY')
 const phaseNumber = computed(() => {
@@ -112,6 +119,7 @@ function openMissionControl() {
   runtime.closeAirspace()
   context.openActionMode('CONTROL')
 }
+function chooseMode(mode) { splitOpen.value = false; runtime.openPlannerMode(mode) }
 function formatMoney(minor) {
   return new Intl.NumberFormat('zh-CN', { style: 'currency', currency: 'CNY', maximumFractionDigits: 0 }).format(Number(minor || 0) / 100)
 }
@@ -137,6 +145,7 @@ onBeforeUnmount(() => { if (balanceAnimationFrame) cancelAnimationFrame(balanceA
 .mission-trigger{display:flex;gap:7px}.start-button,.control-button,.history-button { min-height:40px; padding:0 14px; border-radius:2px; font-weight:750; letter-spacing:.04em; }
 .start-button { border:0; color:var(--world-void); background:var(--signal-mint); }
 .start-button.has-preview { border:1px solid rgba(126,240,196,.32); color:#a8e8d1; background:rgba(8,37,39,.62); }
+.delivery-split{position:relative;display:flex}.delivery-split .split-main{border-radius:2px 0 0 2px}.delivery-split .split-arrow{min-width:34px;padding:0;border-left:1px solid rgba(3,23,16,.28);border-radius:0 2px 2px 0}.split-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:20;display:grid;min-width:144px;padding:5px;border:1px solid rgba(126,240,196,.28);background:#061823;box-shadow:0 12px 30px rgba(0,0,0,.48)}.split-menu button{min-height:34px;border:0;color:var(--text-primary);background:transparent;text-align:left}.split-menu button:hover,.split-menu button:focus-visible{color:var(--signal-mint);background:rgba(126,240,196,.08)}
 .control-button { border:1px solid var(--surface-line-strong); color:var(--text-primary); background:rgba(8,30,42,.75); }
 .history-button { border:1px solid rgba(83,221,255,.22); color:var(--signal-primary); background:rgba(8,30,42,.75); }
 @media (max-width:1300px) { .mission-state { grid-template-columns:minmax(210px,1fr) auto auto auto; gap:14px; }.mission-runtime { display:none; } }

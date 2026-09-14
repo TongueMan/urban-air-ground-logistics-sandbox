@@ -438,11 +438,245 @@ class TaskInstanceServiceEconomyTest {
         assertThat(rewards).filteredOn(point -> "AIR".equals(point.get("kind"))).hasSize(expected);
     }
 
+    @Test
+    void tutorial02UsesItsStableCarrierProfileWhenTheDeployedAircraftIsAnIndependentVtol() throws Exception {
+        TaskInstanceService service = fixture(100, 100, true, true);
+
+        Map<String, Object> generated = service.generate(VISITOR, ScenarioTemplateCatalog.CAMPUS_TEMPLATE_ID,
+                "2026091202", Map.of("airspaceThemeCount", 2, "tutorialBatteryProtected", true),
+                "ADVANCED", TutorialProgressService.GROUND_COOP_ID);
+        Map<String, Object> generatedPlan = plan(generated);
+        Map<String, Object> tutorialAir = map(generatedPlan.get("airVehicle"));
+        Map<String, Object> quote = map(generatedPlan.get("economyQuote"));
+        Map<String, Object> rendezvous = map(generatedPlan.get("rendezvousPlan"));
+
+        assertThat(map(generated.get("validation")).get("status")).isEqualTo("PASSED");
+        assertThat(tutorialAir).containsEntry("typeId", "smart-city-drone")
+                .containsEntry("modelAssetId", "smart-city-drone")
+                .containsEntry("independentRoute", false);
+        assertThat(maps(map(generatedPlan.get("airspace")).get("volumes"))).isEmpty();
+        assertThat(maps(generatedPlan.get("rewardDiamonds"))).isEmpty();
+        assertThat(((Number) quote.get("estimatedGrossRewardMinor")).longValue()).isZero();
+        assertThat(((Number) quote.get("maximumGrossRewardMinor")).longValue()).isZero();
+        assertThat(maps(generatedPlan.get("groundRewards")))
+                .filteredOn(reward -> "GROUND_TROPHY".equals(reward.get("rewardType")))
+                .hasSizeBetween(2, 5);
+        assertThat(maps(generatedPlan.get("groundRewards"))).allSatisfy(reward -> {
+            assertThat(((Number) reward.get("baseRewardMinor")).longValue()).isZero();
+            assertThat(((Number) reward.get("rewardMinor")).longValue()).isZero();
+        });
+        assertThat(((Number) quote.get("deliveryPointCount")).intValue())
+                .isEqualTo(maps(generatedPlan.get("deliveryPoints")).size());
+        assertThat(((Number) rendezvous.get("launchRouteProgress")).doubleValue()).isBetween(0.0, 100.0);
+        assertThat(((Number) rendezvous.get("recoveryRouteProgress")).doubleValue()).isBetween(0.0, 100.0);
+    }
+
+    @Test
+    void advancedPlanningKeepsCarrierNodesForTheLightDrone() throws Exception {
+        TaskInstanceService service = fixture(100, 100, false, true);
+
+        Map<String, Object> generated = service.generate(VISITOR, ScenarioTemplateCatalog.CAMPUS_TEMPLATE_ID,
+                "2026091344", Map.of("airspaceThemeCount", 2), "ADVANCED", null);
+        Map<String, Object> generatedPlan = plan(generated);
+        double[] launch = coordinate(generatedPlan.get("launchPoint"));
+        double[] recovery = coordinate(generatedPlan.get("recoveryPoint"));
+
+        assertThat(map(generated.get("validation")).get("status")).isEqualTo("PASSED");
+        assertThat(map(generatedPlan.get("airVehicle"))).containsEntry("independentRoute", false);
+        assertThat(maps(generatedPlan.get("rewardDiamonds"))).allSatisfy(diamond ->
+                assertThat(diamond).containsEntry("kind", "AIR").containsEntry("rewardType", "DIAMOND"));
+        assertThat(maps(generatedPlan.get("groundRewards"))).allSatisfy(reward -> {
+            assertThat(reward).containsEntry("kind", "GROUND");
+            assertThat(String.valueOf(reward.get("rewardType"))).isIn("GROUND_COIN", "GROUND_TROPHY");
+        });
+        assertThat(map(generatedPlan.get("sharedGroundNodes"))).containsKeys("uavLaunch", "uavRecovery");
+        assertThat(maps(generatedPlan.get("routeCandidates"))).hasSize(3).allSatisfy(candidate -> {
+            List<double[]> route = TaskInstanceService.points(candidate);
+            assertThat(nearestHorizontalDistance(route, launch)).isLessThanOrEqualTo(20);
+            assertThat(nearestHorizontalDistance(route, recovery)).isLessThanOrEqualTo(20);
+            assertThat(longestHorizontalSegment(route))
+                    .as("fallback route must stay on the curated campus road graph instead of cutting across the lake")
+                    .isLessThan(250);
+        });
+
+        Map<String, Object> startPlan = service.preparePlanForStart(String.valueOf(generated.get("taskId")), VISITOR,
+                "ROUTE-CANDIDATE-B");
+        assertThat((List<?>) startPlan.get("mandatoryGroundNodes")).hasSize(3);
+        assertThat(maps(startPlan.get("routes")).stream()
+                .filter(route -> "GROUND".equals(route.get("kind"))).findFirst().orElseThrow())
+                .containsEntry("color", "#46dff2")
+                .containsEntry("selectedBaseline", true);
+    }
+
+    @Test
+    void advancedPlanningKeepsHeavyTransportIndependentFromGroundRecoveryNodes() throws Exception {
+        TaskInstanceService service = fixture(100, 100, true, true);
+
+        for (int seed = 2026091310; seed < 2026091315; seed++) {
+            Map<String, Object> generated = service.generate(VISITOR, ScenarioTemplateCatalog.CAMPUS_TEMPLATE_ID,
+                    String.valueOf(seed), Map.of("airspaceThemeCount", 2), "ADVANCED", null);
+            Map<String, Object> generatedPlan = plan(generated);
+            Map<String, Object> airRoute = maps(generatedPlan.get("routes")).stream()
+                    .filter(route -> "AIR".equals(route.get("kind"))).findFirst().orElseThrow();
+            Map<String, Object> groundRoute = maps(generatedPlan.get("routes")).stream()
+                    .filter(route -> "GROUND".equals(route.get("kind"))).findFirst().orElseThrow();
+            List<double[]> airPoints = TaskInstanceService.points(airRoute);
+
+            assertThat(map(generated.get("validation")).get("status")).isEqualTo("PASSED");
+            assertThat(map(generatedPlan.get("airVehicle"))).containsEntry("independentRoute", true);
+            assertThat(maps(generatedPlan.get("rewardDiamonds"))).allSatisfy(diamond ->
+                    assertThat(diamond).containsEntry("kind", "AIR").containsEntry("rewardType", "DIAMOND"));
+            assertThat(maps(generatedPlan.get("groundRewards"))).allSatisfy(reward -> {
+                assertThat(reward).containsEntry("kind", "GROUND");
+                assertThat(String.valueOf(reward.get("rewardType"))).isIn("GROUND_COIN", "GROUND_TROPHY");
+            });
+            assertThat(map(generatedPlan.get("sharedGroundNodes")))
+                    .containsKeys("start", "end").doesNotContainKeys("uavLaunch", "uavRecovery");
+            assertThat(groundRoute).doesNotContainKeys("launchPoint", "recoveryPoint");
+            assertThat(maps(generatedPlan.get("routeCandidates"))).hasSize(3)
+                    .allSatisfy(candidate -> assertThat(candidate).doesNotContainKeys("launchPoint", "recoveryPoint"));
+            assertThat(horizontalDistance(coordinate(generatedPlan.get("launchPoint")), airPoints.get(0)))
+                    .isLessThanOrEqualTo(10);
+            assertThat(horizontalDistance(coordinate(generatedPlan.get("recoveryPoint")), airPoints.get(airPoints.size() - 1)))
+                    .isLessThanOrEqualTo(10);
+
+            Map<String, Object> startPlan = service.preparePlanForStart(String.valueOf(generated.get("taskId")), VISITOR,
+                    "ROUTE-CANDIDATE-B");
+            assertThat((List<?>) startPlan.get("mandatoryGroundNodes")).hasSize(1);
+        }
+    }
+
+    @Test
+    void advancedGroundTrophiesAreSeededValuableSpacedAndBalancedAcrossRoutes() throws Exception {
+        TaskInstanceService service = fixture(100, 100, false, true);
+        java.util.Set<Integer> observedCounts = new java.util.HashSet<>();
+        int successfulSeeds = 0;
+        String replaySeed = null;
+        String firstSuccessfulTaskId = null;
+        Map<String, Object> firstSuccessfulPlan = null;
+
+        for (int seed = 2026091400; seed < 2026091480
+                && (successfulSeeds < 12 || observedCounts.size() < 4); seed++) {
+            Map<String, Object> generated;
+            try {
+                generated = service.generate(VISITOR, ScenarioTemplateCatalog.CAMPUS_TEMPLATE_ID,
+                        String.valueOf(seed), Map.of("airspaceThemeCount", 2), "ADVANCED", null);
+            } catch (DemoException rejectedSeed) {
+                // A caller-supplied seed is allowed to describe an infeasible airspace
+                // combination. The UI uses automatic seed replacement; this test only
+                // samples valid deterministic plans.
+                continue;
+            }
+            Map<String, Object> generatedPlan = plan(generated);
+            successfulSeeds++;
+            if (firstSuccessfulPlan == null) {
+                firstSuccessfulPlan = generatedPlan;
+                replaySeed = String.valueOf(seed);
+                firstSuccessfulTaskId = String.valueOf(generated.get("taskId"));
+            }
+            List<Map<String, Object>> rewards = maps(generatedPlan.get("groundRewards"));
+            List<Map<String, Object>> coins = rewards.stream()
+                    .filter(reward -> "GROUND_COIN".equals(reward.get("rewardType"))).toList();
+            List<Map<String, Object>> trophies = rewards.stream()
+                    .filter(reward -> "GROUND_TROPHY".equals(reward.get("rewardType"))).toList();
+
+            observedCounts.add(trophies.size());
+            assertThat(coins).hasSize(2).allSatisfy(coin ->
+                    assertThat(((Number) coin.get("rewardMinor")).longValue()).isEqualTo(80_000L));
+            assertThat(trophies).hasSizeBetween(2, 5).allSatisfy(trophy -> {
+                assertThat(((Number) trophy.get("rewardMinor")).longValue()).isEqualTo(300_000L);
+                assertThat(((List<?>) trophy.get("eligibleCandidateIds")).stream().map(String::valueOf).toList())
+                        .contains(String.valueOf(trophy.get("placementCandidateId")));
+            });
+            for (Map<String, Object> trophy : trophies) {
+                double[] anchor = coordinate(trophy.get("roadAnchor"));
+                rewards.stream().filter(other -> other != trophy).forEach(other ->
+                        assertThat(horizontalDistance(anchor, coordinate(other.get("roadAnchor"))))
+                                .isGreaterThanOrEqualTo(60));
+            }
+            Map<String, Long> byRoute = trophies.stream().collect(java.util.stream.Collectors.groupingBy(
+                    trophy -> String.valueOf(trophy.get("placementCandidateId")),
+                    java.util.stream.Collectors.counting()));
+            List<Long> routeCounts = maps(generatedPlan.get("routeCandidates")).stream()
+                    .map(candidate -> byRoute.getOrDefault(String.valueOf(candidate.get("candidateId")), 0L)).toList();
+            assertThat(java.util.Collections.max(routeCounts) - java.util.Collections.min(routeCounts))
+                    .isLessThanOrEqualTo(1);
+            long maximumGroundRewardMinor = rewards.stream()
+                    .mapToLong(reward -> ((Number) reward.get("rewardMinor")).longValue()).sum();
+            assertThat(((Number) map(generatedPlan.get("economyQuote")).get("maximumGroundRewardMinor")).longValue())
+                    .isEqualTo(maximumGroundRewardMinor)
+                    .isEqualTo(160_000L + trophies.size() * 300_000L);
+            Map<String, Object> quote = map(generatedPlan.get("economyQuote"));
+            for (Map<String, Object> candidate : maps(generatedPlan.get("routeCandidates"))) {
+                String candidateId = String.valueOf(candidate.get("candidateId"));
+                List<Map<String, Object>> eligible = rewards.stream().filter(reward ->
+                        ((List<?>) reward.get("eligibleCandidateIds")).stream().map(String::valueOf)
+                                .anyMatch(candidateId::equals)).toList();
+                long expectedGround = eligible.stream()
+                        .mapToLong(reward -> ((Number) reward.get("rewardMinor")).longValue()).sum();
+                long expectedTrophies = eligible.stream()
+                        .filter(reward -> "GROUND_TROPHY".equals(reward.get("rewardType")))
+                        .mapToLong(reward -> ((Number) reward.get("rewardMinor")).longValue()).sum();
+                assertThat(((Number) map(quote.get("groundRewardMinorByCandidate")).get(candidateId)).longValue())
+                        .isEqualTo(expectedGround);
+                assertThat(((Number) map(quote.get("trophyRewardMinorByCandidate")).get(candidateId)).longValue())
+                        .isEqualTo(expectedTrophies);
+            }
+        }
+
+        assertThat(observedCounts).containsExactlyInAnyOrder(2, 3, 4, 5);
+        assertThat(successfulSeeds).isGreaterThanOrEqualTo(12);
+        Map<String, Object> replay = plan(service.generate(VISITOR, ScenarioTemplateCatalog.CAMPUS_TEMPLATE_ID,
+                replaySeed, Map.of("airspaceThemeCount", 2), "ADVANCED", null));
+        assertThat(replay.get("groundRewards")).isEqualTo(firstSuccessfulPlan.get("groundRewards"));
+
+        String selectedCandidateId = String.valueOf(maps(firstSuccessfulPlan.get("routeCandidates")).get(0).get("candidateId"));
+        Map<String, Object> selectedPlan = service.preparePlanForStart(firstSuccessfulTaskId, VISITOR, selectedCandidateId);
+        Map<String, Object> selectedQuote = map(selectedPlan.get("economyQuote"));
+        long expectedSelectedGround = ((Number) map(selectedQuote.get("groundRewardMinorByCandidate"))
+                .get(selectedCandidateId)).longValue();
+        long expectedSelectedTrophies = ((Number) map(selectedQuote.get("trophyRewardMinorByCandidate"))
+                .get(selectedCandidateId)).longValue();
+        assertThat(selectedQuote.get("groundRewardCandidateId")).isEqualTo(selectedCandidateId);
+        assertThat(((Number) selectedQuote.get("groundCargoRewardMinor")).longValue()).isEqualTo(expectedSelectedGround);
+        assertThat(((Number) selectedQuote.get("groundTrophyRewardMinor")).longValue()).isEqualTo(expectedSelectedTrophies);
+        assertThat(((Number) selectedQuote.get("estimatedGrossRewardMinor")).longValue()).isEqualTo(
+                expectedSelectedGround
+                        + ((Number) selectedQuote.get("airCargoRewardMinor")).longValue()
+                        + ((Number) selectedQuote.get("diamondPotentialMinor")).longValue()
+                        + ((Number) selectedQuote.get("estimatedTimelinessRewardMinor")).longValue());
+    }
+
+    @Test
+    void advancedRouteRejectsAProviderLegThatRetracesTheRoadItJustUsed() {
+        List<double[]> travelled = List.of(
+                new double[]{117.2100, 31.7780, .35},
+                new double[]{117.2090, 31.7770, .35},
+                new double[]{117.2080, 31.7760, .35});
+        List<double[]> uTurn = List.of(
+                new double[]{117.2080, 31.7760, .35},
+                new double[]{117.2090, 31.7770, .35},
+                new double[]{117.2100, 31.7780, .35},
+                new double[]{117.2102, 31.7770, .35});
+        List<double[]> throughRoute = List.of(
+                new double[]{117.2080, 31.7760, .35},
+                new double[]{117.2078, 31.7750, .35},
+                new double[]{117.2083, 31.7740, .35});
+
+        assertThat(TaskInstanceService.hasSubstantialSegmentBacktrack(travelled, uTurn)).isTrue();
+        assertThat(TaskInstanceService.hasSubstantialSegmentBacktrack(travelled, throughRoute)).isFalse();
+    }
+
     private static TaskInstanceService fixture() throws Exception {
         return fixture(92, 100);
     }
 
     private static TaskInstanceService fixture(double groundBatteryPercent, double airBatteryPercent) throws Exception {
+        return fixture(groundBatteryPercent, airBatteryPercent, false, false);
+    }
+
+    private static TaskInstanceService fixture(double groundBatteryPercent, double airBatteryPercent,
+                                               boolean independentAir, boolean advancedEnabled) throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         Map<String, Object> base;
         try (InputStream input = new ClassPathResource("mission/logistics-mission.json").getInputStream()) {
@@ -463,9 +697,15 @@ class TaskInstanceServiceEconomyTest {
                 new FleetService.GroundVehicle("ASSET-TEST-GROUND", "tricycle", "测试配送车",
                         "tricycle", 1, groundBatteryPercent, 18, 5, 1.5, Map.of()));
         when(fleet.freezeAirVehicle(org.mockito.ArgumentMatchers.anyString())).thenReturn(
-                new FleetService.AirVehicle("ASSET-TEST-AIR", "smart-city-drone", "测试轻型无人机",
-                        "smart-city-drone", 2, airBatteryPercent, 28, 3, 1, 8, false, Map.of()));
-        return new TaskInstanceService(templates, baidu, signals, fleet, jdbc, mapper);
+                new FleetService.AirVehicle("ASSET-TEST-AIR",
+                        independentAir ? "vtol-air-taxi" : "smart-city-drone",
+                        independentAir ? "测试重载运输机" : "测试轻型无人机",
+                        independentAir ? "vtol-air-taxi" : "smart-city-drone",
+                        2, airBatteryPercent, independentAir ? 52 : 28, independentAir ? 9 : 3,
+                        independentAir ? 3 : 1, independentAir ? 2 : 8, independentAir, Map.of()));
+        if (!advancedEnabled) return new TaskInstanceService(templates, baidu, signals, fleet, jdbc, mapper);
+        return new TaskInstanceService(templates, baidu, signals, fleet, jdbc, mapper,
+                new AdvancedRoutingProperties(true, true, true, 300, 600, 2, 3, 40, 1500, 1.6, 18));
     }
 
     private static void createSchema(JdbcTemplate jdbc) {
@@ -476,10 +716,16 @@ class TaskInstanceServiceEconomyTest {
                 "provider_latency_ms BIGINT NOT NULL DEFAULT 0, failure_code VARCHAR(64), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
         jdbc.execute("CREATE TABLE demo_task_instance (id VARCHAR(40) PRIMARY KEY, visitor_hash CHAR(64) NOT NULL, " +
                 "scenario_template_id VARCHAR(64) NOT NULL, scenario_template_version VARCHAR(16) NOT NULL, " +
-                "generator_version VARCHAR(32) NOT NULL, ruleset_version VARCHAR(32) NOT NULL, seed_value VARCHAR(20) NOT NULL, " +
+                "generator_version VARCHAR(32) NOT NULL, ruleset_version VARCHAR(32) NOT NULL, planning_mode VARCHAR(16) NOT NULL DEFAULT 'BASIC', tutorial_id VARCHAR(64), seed_value VARCHAR(20) NOT NULL, " +
                 "resolved_parameters_json CLOB NOT NULL, plan_json CLOB NOT NULL, validation_json CLOB NOT NULL, " +
-                "generation_trace_json CLOB NOT NULL, plan_hash CHAR(64) NOT NULL, route_artifact_id VARCHAR(40) NOT NULL, " +
+                "generation_trace_json CLOB NOT NULL, plan_hash CHAR(64) NOT NULL, route_artifact_id VARCHAR(40), selected_baseline_route_candidate_id VARCHAR(64), baseline_selected_at TIMESTAMP, " +
                 "lifecycle_status VARCHAR(24) NOT NULL, created_at TIMESTAMP NOT NULL, expires_at TIMESTAMP NOT NULL, started_at TIMESTAMP)");
+        jdbc.execute("CREATE TABLE demo_task_route_candidate (task_instance_id VARCHAR(40) NOT NULL, candidate_id VARCHAR(64) NOT NULL, " +
+                "candidate_order INT NOT NULL, label VARCHAR(64) NOT NULL, color VARCHAR(16) NOT NULL, route_artifact_id VARCHAR(40) NOT NULL, " +
+                "route_hash CHAR(64) NOT NULL, distance_meters DECIMAL(12,3) NOT NULL, source VARCHAR(32) NOT NULL, PRIMARY KEY(task_instance_id,candidate_id))");
+        jdbc.execute("CREATE TABLE demo_ground_reward (task_instance_id VARCHAR(40) NOT NULL, reward_id VARCHAR(64) NOT NULL, " +
+                "reward_type VARCHAR(24) NOT NULL, actor_kind VARCHAR(16) NOT NULL, visual_position_json CLOB NOT NULL, road_anchor_json CLOB NOT NULL, " +
+                "reward_minor BIGINT NOT NULL, trigger_radius_meters DECIMAL(8,2) NOT NULL, eligible_candidate_ids_json CLOB NOT NULL, PRIMARY KEY(task_instance_id,reward_id))");
     }
 
     @SuppressWarnings("unchecked")
@@ -499,5 +745,20 @@ class TaskInstanceServiceEconomyTest {
     private static double[] coordinate(Object value) {
         List<?> point = (List<?>) value;
         return new double[]{((Number) point.get(0)).doubleValue(), ((Number) point.get(1)).doubleValue(), ((Number) point.get(2)).doubleValue()};
+    }
+
+    private static double nearestHorizontalDistance(List<double[]> route, double[] target) {
+        return route.stream().mapToDouble(point -> horizontalDistance(point, target)).min().orElse(Double.POSITIVE_INFINITY);
+    }
+
+    private static double longestHorizontalSegment(List<double[]> route) {
+        double longest = 0;
+        for (int index = 1; index < route.size(); index++)
+            longest = Math.max(longest, horizontalDistance(route.get(index - 1), route.get(index)));
+        return longest;
+    }
+
+    private static double horizontalDistance(double[] first, double[] second) {
+        return MissionMath.distance(new double[]{first[0], first[1], 0}, new double[]{second[0], second[1], 0});
     }
 }

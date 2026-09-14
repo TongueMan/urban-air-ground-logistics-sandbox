@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { emergencyLightFrame, emergencyLightSide } from '../src/utils/emergencyVehicleLights.mjs'
 import {
   adjustFollowZoomScale,
   bearingDegrees,
@@ -16,6 +17,7 @@ import {
   missionFollowCamera,
   missionModelPhaseState,
   polylineGeometryKey,
+  remainingRouteToTarget,
   selectMissionActualPoints,
   telemetryMotionRatio,
   telemetryTransitionDuration
@@ -27,6 +29,28 @@ test('dynamic air sortie progress maps take-off and landing margins onto the exe
   assert.equal(executableAirRouteFraction(.5, true), .5)
   assert.equal(executableAirRouteFraction(.95, true), 1)
   assert.equal(executableAirRouteFraction(.6, false), .6)
+})
+
+test('patrol light materials are recognized and alternate as a red-blue double flash', () => {
+  assert.equal(emergencyLightSide('red_light.001'), 'red')
+  assert.equal(emergencyLightSide('blue_cone.001'), 'blue')
+  assert.equal(emergencyLightSide('body.001'), null)
+
+  const redFirst = emergencyLightFrame(0)
+  assert.ok(redFirst.red.emissiveIntensity > redFirst.blue.emissiveIntensity)
+  const redSecond = emergencyLightFrame(240)
+  assert.ok(redSecond.red.glowOpacity > redSecond.blue.glowOpacity)
+  const blueFirst = emergencyLightFrame(480)
+  assert.ok(blueFirst.blue.emissiveIntensity > blueFirst.red.emissiveIntensity)
+  const blueSecond = emergencyLightFrame(720)
+  assert.ok(blueSecond.blue.glowOpacity > blueSecond.red.glowOpacity)
+})
+
+test('reduced motion keeps both patrol lights steady instead of flashing', () => {
+  const start = emergencyLightFrame(0, true)
+  const later = emergencyLightFrame(840, true)
+  assert.deepEqual(start, later)
+  assert.equal(start.red.emissiveIntensity, start.blue.emissiveIntensity)
 })
 
 test('north/east bearings use map heading convention', () => {
@@ -69,6 +93,25 @@ test('arc-length sampler remains on the supplied road polyline', () => {
     const onVertical = Math.abs(coordinate[0] - 117.001) < 1e-10
     assert.ok(onHorizontal || onVertical)
   }
+})
+
+test('temporary-target connector follows only the remaining road geometry', () => {
+  const route = [
+    [117, 31, 0],
+    [117, 31.001, 0],
+    [117.001, 31.001, 0],
+    [117.001, 31.002, 0]
+  ]
+  const firstLegMeters = createPolylineSampler(route.slice(0, 2)).total
+  const current = [117, 31.0005, 0]
+  const section = remainingRouteToTarget(route, firstLegMeters / 2, [117.001, 31.0015, 0], current)
+
+  assert.deepEqual(section[0], current)
+  assert.deepEqual(section[1], route[1])
+  assert.deepEqual(section[2], route[2])
+  assert.ok(Math.abs(section.at(-1)[0] - 117.001) < 1e-9)
+  assert.ok(Math.abs(section.at(-1)[1] - 31.0015) < 1e-9)
+  assert.equal(section.some(point => point[1] === 31.002), false)
 })
 
 test('route geometry cache key changes when only interior detour points change', () => {

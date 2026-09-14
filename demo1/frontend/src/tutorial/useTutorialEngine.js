@@ -17,6 +17,9 @@ import {
   AIRSPACE_PANEL_DEPENDENT_STEPS,
   FLEET_HUB_DEPENDENT_STEPS,
   FLEET_TUTORIAL_CHAPTER,
+  GROUND_COOP_PLANNER_STEPS,
+  GROUND_COOP_TUTORIAL_CHAPTER,
+  GROUND_COOP_TUTORIAL_VERSION,
   PLANNER_DEPENDENT_STEPS,
   PROLOGUE_TUTORIAL_SEED,
   RUN_DEPENDENT_STEPS,
@@ -60,6 +63,9 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   const chapterPreparing = ref(false)
   const manualAttentionSeen = ref(false)
   const progressContext = ref({})
+  const skipConfirmOpen = ref(false)
+  const skipError = ref('')
+  const skipInFlight = ref(false)
 
   let typewriterTimer = null
   let transitionTimer = null
@@ -79,6 +85,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   let redFinePauseInFlight = false
   let rewindActionStarted = false
   let fleetRecoveryInFlight = false
+  let groundMilestoneInFlight = false
 
   const phase = computed(() => state.value.phase)
   const selectedChapter = computed(() => getTutorialChapter(selectedChapterId.value))
@@ -92,7 +99,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     TUTORIAL_PHASES.ACTION_SUCCESS
   ].includes(phase.value))
   const locksInteraction = computed(() => phase.value === TUTORIAL_PHASES.ACTION && currentStep.value?.mode === 'action')
-  const plannerAware = computed(() => activeChapterId.value === TUTORIAL_CHAPTER && Boolean(runtime.plannerOpen.value))
+  const plannerAware = computed(() => [TUTORIAL_CHAPTER, GROUND_COOP_TUTORIAL_CHAPTER].includes(activeChapterId.value) && Boolean(runtime.plannerOpen.value))
   const fleetAware = computed(() => activeChapterId.value === FLEET_TUTORIAL_CHAPTER && Boolean(fleetRuntime?.isOpen.value))
   const selectedProgress = computed(() => progressRecords.value[selectedChapterId.value] || null)
   const replayAllowed = computed(() => canReplayTutorial({
@@ -110,7 +117,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   const chapterCards = computed(() => TUTORIAL_CHAPTERS.map(chapter => ({
     ...chapter,
     status: statuses.value[chapter.id] || 'new',
-    unlocked: tutorialChapterUnlocked(chapter.id, statuses.value)
+    unlocked: chapterAccessGranted(chapter.id, statuses.value)
   })))
   const beaconChapterIndex = computed(() => {
     const next = chapterCards.value.find(chapter => chapter.unlocked && ['new', 'in_progress'].includes(chapter.status))
@@ -125,29 +132,81 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   const spotlightRect = computed(() => targetRect.value
     ? expandRect(targetRect.value, 12, { width: window.innerWidth, height: window.innerHeight })
     : null)
-  const speaker = computed(() => state.value.wrongAttempts >= 3 && isActionMode.value
+  const groundRewardOnBaseline = computed(() => {
+    if (activeChapterId.value !== GROUND_COOP_TUTORIAL_CHAPTER || currentStep.value?.id !== '02-A04') return false
+    const mission = activeMission()
+    const targetId = String(mission?.groundRouting?.activeTemporaryTarget?.targetId || '')
+    const reward = (mission?.groundRewards || []).find(item => String(item.id || '') === targetId)
+    return Boolean(targetId && reward?.eligibleCandidateIds?.map(String)
+      .includes(String(mission?.groundRouting?.baselineRouteCandidateId || '')) && !groundTutorialEvidence().routeOutsideReward)
+  })
+  const speaker = computed(() => groundRewardOnBaseline.value ? 'cheng' : state.value.wrongAttempts >= 3 && isActionMode.value
     ? 'anan'
     : currentStep.value?.speaker)
-  const expression = computed(() => state.value.wrongAttempts >= 3 && isActionMode.value
+  const expression = computed(() => groundRewardOnBaseline.value ? 'analysis' : state.value.wrongAttempts >= 3 && isActionMode.value
     ? 'awkward'
     : currentStep.value?.expression)
   const effectiveText = computed(() => {
-    if (targetSyncDelayed.value && !targetElement.value) {
+    if (targetSyncDelayed.value) {
       if (REWIND_INTERACTION_STEPS.has(currentStep.value.id)) return '正在核对关键节点状态。界面准备好后会自动继续，不需要重复点击。'
+      if (currentStep.value.id === '02-A04') return '地面奖励点仍在同步，请稍候；目标出现后可以直接重试。'
       return '目标仍在同步，请稍候。界面准备好后会自动继续。'
     }
-    if (generationFailed.value && currentStep.value.id === 'A03') return '方案没有通过这次校验。检查系统提示后，再点击一次生成本局任务。'
-    if (startFailed.value && currentStep.value.id === 'A04') return '任务没有成功启动。保留当前方案，再点击一次“开始配送”即可重试。'
+    if (groundRewardOnBaseline.value) return '这处奖励就在当前基线上，车辆没有真正改变执行路线。换一处属于其他候选路线的奖励，再试一次。'
+    if (generationFailed.value && ['A03', '02-A01'].includes(currentStep.value.id)) return '方案没有通过这次校验。检查系统提示后，再点击一次生成本局任务。'
+    if (startFailed.value && ['A04', '02-A03'].includes(currentStep.value.id)) return '任务没有成功启动。保留当前方案，再点击一次“开始配送”即可重试。'
     if (redCourseFailed.value && currentStep.value.id === 'WAIT-RED-VIOLATION') return '任务暂时未能恢复，系统正在重试原航线观察。'
     if (rewindFailed.value && currentStep.value.id === 'A08-RESTORE') return '回溯没有成功应用。黄色节点仍然保留，请再点击一次“回到这里重新选择”。'
     if (detourFailed.value && currentStep.value.id === 'A09-DETOUR') return '绕飞没有成功应用。查看系统提示后，再点击一次“从侧面绕飞”。'
     if (state.value.wrongAttempts >= 3 && isActionMode.value) return '先点亮起的目标。其他操作等教程结束后再试。'
-    if (state.value.waiting && currentStep.value.id === 'A03') return '正在生成与校验路线、配送点、奖励和四种空域…'
-    if (state.value.waiting && currentStep.value.id === 'A04') return '正在启动真实配送任务并暂停仿真…'
+    if (state.value.waiting && ['A03', '02-A01'].includes(currentStep.value.id)) return '正在生成与校验路线、配送点、奖励和候选基线…'
+    if (state.value.waiting && ['A04', '02-A03'].includes(currentStep.value.id)) return '正在启动真实配送任务并暂停仿真…'
     if (state.value.waiting && currentStep.value.id === 'A08-RESTORE') return '正在撤销黄色节点之后的错误分支并恢复任务状态…'
     if (state.value.waiting && currentStep.value.id === 'A09-DETOUR') return '正在应用绕飞航线…'
     return currentStep.value?.text || ''
   })
+
+  function normalizeServerStatus(status) {
+    return ({ NEW: 'new', IN_PROGRESS: 'in_progress', COMPLETED: 'completed', SKIPPED: 'skipped' })[String(status || '').toUpperCase()] || 'new'
+  }
+
+  function groundTutorialItem() {
+    return runtime.tutorialState.value?.items?.find(item => item.tutorialId === GROUND_COOP_TUTORIAL_CHAPTER) || null
+  }
+
+  function chapterAccessGranted(chapterId, statusMap = statuses.value) {
+    // Chapter 02 is server-authorized. Local progress can be stale after a
+    // container restart, so it must never unlock this chapter by itself.
+    if (chapterId === GROUND_COOP_TUTORIAL_CHAPTER) {
+      return groundTutorialItem()?.availability === 'AVAILABLE'
+    }
+    return tutorialChapterUnlocked(chapterId, statusMap)
+  }
+
+  function groundTutorialEvidence() {
+    const live = activeMission()?.groundRouting?.tutorialEvidence
+    return live && typeof live === 'object' ? live : (groundTutorialItem()?.evidence || {})
+  }
+
+  function groundTutorialRunMatches() {
+    return Boolean(activeRunId() && activeMission()?.tutorialId === GROUND_COOP_TUTORIAL_CHAPTER
+      && (!progressContext.value.runId || String(progressContext.value.runId) === activeRunId()))
+  }
+
+  function groundPaceDeparted() {
+    const pace = activeMission()?.paceVehicle
+    if (!pace) return false
+    const status = String(pace.status || '').toUpperCase()
+    return ['RUNNING', 'ARRIVED'].includes(status)
+      || (status !== 'WAITING' && Number(pace.departureCountdownSeconds) <= 0)
+  }
+
+  function configureGroundTutorialCamera(stepId = currentStep.value?.id) {
+    if (typeof runtime.setTutorialMapCameraTarget !== 'function') return
+    const closeup = activeChapterId.value === GROUND_COOP_TUTORIAL_CHAPTER
+      && ['02-D03-PACE', '02-D03-DEADLINE'].includes(stepId)
+    runtime.setTutorialMapCameraTarget(closeup ? 'pace' : '')
+  }
 
   function dispatch(event) {
     state.value = tutorialReducer(state.value, event, steps.value)
@@ -160,7 +219,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
 
   function recordProgress(chapterId, status = 'in_progress', stepId) {
     const chapter = getTutorialChapter(chapterId)
-    const context = chapter.id === TUTORIAL_CHAPTER ? progressContext.value : {}
+    const context = [TUTORIAL_CHAPTER, GROUND_COOP_TUTORIAL_CHAPTER].includes(chapter.id) ? progressContext.value : {}
     const next = createProgressRecord(stepId || chapter.steps[0].id, status, Date.now(), chapter.id, context)
     window.localStorage.setItem(chapter.storageKey, JSON.stringify(next))
     progressRecords.value = { ...progressRecords.value, [chapter.id]: next }
@@ -358,10 +417,23 @@ export function useTutorialEngine(runtime, fleetRuntime) {
 
   async function startTutorial(chapterId = selectedChapterId.value) {
     const card = chapterCards.value.find(chapter => chapter.id === chapterId)
-    if (!card?.unlocked || !ready.value || !replayAllowed.value || chapterPreparing.value) return false
+    if (!card || !ready.value || !replayAllowed.value || chapterPreparing.value) return false
+    if (chapterId !== GROUND_COOP_TUTORIAL_CHAPTER && !card.unlocked) return false
 
     chapterPreparing.value = true
     try {
+      if (chapterId === GROUND_COOP_TUTORIAL_CHAPTER) {
+        try {
+          await runtime.refreshTutorialState()
+        } catch {
+          runtime.notice.value = '教程状态正在同步，请稍后再试。'
+          return false
+        }
+        if (!chapterAccessGranted(chapterId)) {
+          showLockedGroundTutorial()
+          return false
+        }
+      }
       if (chapterId === TUTORIAL_CHAPTER) {
         await fleetRuntime.initialize({ force: true }).catch(() => null)
         const issue = tutorialFleetIssue(fleetRuntime.snapshot.value)
@@ -389,9 +461,16 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       redCourseObservationStarted = false
       redFinePauseInFlight = false
       rewindActionStarted = false
+      skipConfirmOpen.value = false
+      skipError.value = ''
       if (chapterId === TUTORIAL_CHAPTER) {
         runtime.setTutorialGenerationPreset({ seed: PROLOGUE_TUTORIAL_SEED })
         configureProloguePresentationGuards(getTutorialChapter(chapterId).steps[0].id)
+      } else if (chapterId === GROUND_COOP_TUTORIAL_CHAPTER) {
+        runtime.clearTutorialRedConflictLocked()
+        runtime.clearTutorialRewindLocked()
+        runtime.setTutorialMissionReactionsSuppressed(true)
+        runtime.startGroundTutorial()
       } else {
         runtime.clearTutorialGenerationPreset()
         runtime.clearTutorialRedConflictLocked()
@@ -414,11 +493,8 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   }
 
   function promptNextChapter(finishedChapterId) {
-    if (finishedChapterId !== TUTORIAL_CHAPTER) {
-      manualExpanded.value = false
-      return
-    }
-    selectedChapterId.value = FLEET_TUTORIAL_CHAPTER
+    if (finishedChapterId === TUTORIAL_CHAPTER) selectedChapterId.value = FLEET_TUTORIAL_CHAPTER
+    else if (finishedChapterId === FLEET_TUTORIAL_CHAPTER) selectedChapterId.value = GROUND_COOP_TUTORIAL_CHAPTER
     manualExpanded.value = false
   }
 
@@ -429,9 +505,30 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     runtime.clearTutorialRedConflictLocked()
     runtime.clearTutorialRewindLocked()
     runtime.clearTutorialMissionReactionsSuppressed()
+    runtime.setTutorialMapCameraTarget?.('')
     dispatch({ type: 'CLOSE' })
     activeChapterId.value = ''
     if (promptNext) promptNextChapter(finishedChapterId)
+  }
+
+  function showLockedGroundTutorial() {
+    clearTransitionTimer()
+    runtime.discardTaskPreview()
+    runtime.closePlanner()
+    runtime.clearTutorialGenerationPreset()
+    runtime.clearTutorialRedConflictLocked()
+    runtime.clearTutorialRewindLocked()
+    runtime.clearTutorialMissionReactionsSuppressed()
+    runtime.setTutorialMapCameraTarget?.('')
+    if (activeChapterId.value === GROUND_COOP_TUTORIAL_CHAPTER) {
+      dispatch({ type: 'CLOSE' })
+      activeChapterId.value = ''
+    }
+    selectedChapterId.value = GROUND_COOP_TUTORIAL_CHAPTER
+    manualExpanded.value = true
+    generationFailed.value = false
+    startFailed.value = false
+    runtime.notice.value = '教程 02 尚未解锁，请先完成第 01 章“认识你的车队”。'
   }
 
   async function routeToFleetRecovery(issue) {
@@ -469,11 +566,39 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     return issue ? routeToFleetRecovery(issue) : false
   }
 
-  async function skipTutorial(chapterId = activeChapterId.value || selectedChapterId.value) {
+  async function performSkipTutorial(chapterId) {
     const chapter = getTutorialChapter(chapterId)
-    if (!tutorialChapterUnlocked(chapter.id, statuses.value)) return
+    if (!chapterCards.value.find(item => item.id === chapter.id)?.unlocked) return
     const active = activeChapterId.value === chapter.id && isActive.value
-    recordProgress(chapter.id, 'skipped', active ? currentStep.value.id : chapter.steps[0].id)
+    let resolvedStatus = 'skipped'
+    if (chapter.id === GROUND_COOP_TUTORIAL_CHAPTER) {
+      skipInFlight.value = true
+      skipError.value = ''
+      try {
+        const runningGroundTutorial = groundTutorialRunMatches() && !runtime.isTerminal.value
+        if (runningGroundTutorial && !(await runtime.endMission())) throw new Error(runtime.notice.value || '教学任务中止失败')
+        if (!runningGroundTutorial) runtime.discardTaskPreview()
+        runtime.closePlanner()
+        const synced = await runtime.syncTutorialStatus(GROUND_COOP_TUTORIAL_CHAPTER, GROUND_COOP_TUTORIAL_VERSION, 'SKIPPED')
+        const saved = synced?.items?.find(item => item.tutorialId === GROUND_COOP_TUTORIAL_CHAPTER)
+        resolvedStatus = normalizeServerStatus(saved?.status) === 'completed' ? 'completed' : 'skipped'
+      } catch (error) {
+        skipError.value = error?.message || '跳过状态同步失败，请重试。'
+        return false
+      } finally {
+        skipInFlight.value = false
+      }
+    } else {
+      try {
+        const synced = await runtime.syncTutorialStatus(chapter.id, String(chapter.version), 'SKIPPED')
+        const saved = synced?.items?.find(item => item.tutorialId === chapter.id)
+        resolvedStatus = normalizeServerStatus(saved?.status) === 'completed' ? 'completed' : 'skipped'
+      } catch (error) {
+        runtime.notice.value = error?.message || '教程进度同步失败，请重试。'
+        return false
+      }
+    }
+    recordProgress(chapter.id, resolvedStatus, active ? currentStep.value.id : chapter.steps[0].id)
     if (active && chapter.id === TUTORIAL_CHAPTER) await releaseTutorialPause()
     if (chapter.id === TUTORIAL_CHAPTER) {
       runtime.clearTutorialGenerationPreset()
@@ -481,9 +606,41 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       runtime.clearTutorialRewindLocked()
       runtime.clearTutorialMissionReactionsSuppressed()
     }
-    if (active) closeActiveChapter({ promptNext: chapter.id === TUTORIAL_CHAPTER })
-    else if (chapter.id === TUTORIAL_CHAPTER) promptNextChapter(chapter.id)
+    if (active) closeActiveChapter({ promptNext: [TUTORIAL_CHAPTER, FLEET_TUTORIAL_CHAPTER].includes(chapter.id) })
+    else if ([TUTORIAL_CHAPTER, FLEET_TUTORIAL_CHAPTER].includes(chapter.id)) promptNextChapter(chapter.id)
     else manualExpanded.value = false
+    skipConfirmOpen.value = false
+    return true
+  }
+
+  async function skipTutorial(chapterId = activeChapterId.value || selectedChapterId.value) {
+    const chapter = getTutorialChapter(chapterId)
+    if (chapter.id === GROUND_COOP_TUTORIAL_CHAPTER) {
+      skipError.value = ''
+      skipConfirmOpen.value = true
+      return false
+    }
+    return performSkipTutorial(chapter.id)
+  }
+
+  function cancelSkipTutorial() {
+    if (skipInFlight.value) return
+    skipConfirmOpen.value = false
+    skipError.value = ''
+  }
+
+  async function syncCompletedChapter(chapterId) {
+    if (![TUTORIAL_CHAPTER, FLEET_TUTORIAL_CHAPTER].includes(chapterId)) return
+    const chapter = getTutorialChapter(chapterId)
+    try {
+      await runtime.syncTutorialStatus(chapter.id, String(chapter.version), 'COMPLETED')
+    } catch (error) {
+      runtime.notice.value = error?.message || '教程完成状态将在下次刷新时重试同步。'
+    }
+  }
+
+  function confirmSkipTutorial() {
+    return performSkipTutorial(GROUND_COOP_TUTORIAL_CHAPTER)
   }
 
   function toggleManual() {
@@ -494,6 +651,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       manualAttentionSeen.value = true
     }
     manualExpanded.value = !manualExpanded.value
+    if (manualExpanded.value) void runtime.refreshTutorialState().catch(() => null)
   }
 
   function finishTypewriter() {
@@ -632,6 +790,27 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     }
     if (currentStep.value.id === 'F01-A01') {
       window.setTimeout(() => fleetRuntime.isOpen.value && completeAction(), 0)
+      return
+    }
+    if (currentStep.value.id === '02-A01' && !runtime.busy.value && !state.value.waiting) {
+      previewBeforeAction = runtime.taskPreview.value
+      generationStarted = false
+      generationFailed.value = false
+      dispatch({ type: 'ACTION_WAIT' })
+      return
+    }
+    if (currentStep.value.id === '02-A02') {
+      window.setTimeout(evaluateCurrentCondition, 0)
+      return
+    }
+    if (currentStep.value.id === '02-A03' && !runtime.busy.value && !state.value.waiting) {
+      startFailed.value = false
+      startActionStarted = true
+      dispatch({ type: 'ACTION_WAIT' })
+      return
+    }
+    if (['02-A04', '02-A05'].includes(currentStep.value.id)) {
+      window.setTimeout(evaluateCurrentCondition, 450)
     }
   }
 
@@ -649,13 +828,23 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     ))
   }
 
+  function eventHitsAllowedSelector(event) {
+    const selector = currentStep.value?.allowSelector
+    if (!selector || !(event.target instanceof Element)) return false
+    return Boolean(event.target.closest(selector))
+  }
+
+  function eventHitsActionTarget(event) {
+    return currentStep.value?.allowSelector ? eventHitsAllowedSelector(event) : eventHitsTarget(event)
+  }
+
   function eventHitsTutorialControl(event) {
     return Boolean(event.composedPath?.().some(element => element?.dataset?.tutorialControl !== undefined))
   }
 
   function onDocumentClick(event) {
     if (!locksInteraction.value || eventHitsTutorialControl(event)) return
-    if (eventHitsTarget(event)) {
+    if (eventHitsActionTarget(event)) {
       handleTargetAction(event)
       return
     }
@@ -665,7 +854,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   }
 
   function onDocumentPointerDown(event) {
-    if (locksInteraction.value && !eventHitsTutorialControl(event) && !eventHitsTarget(event)) {
+    if (locksInteraction.value && !eventHitsTutorialControl(event) && !eventHitsActionTarget(event)) {
       event.preventDefault()
       event.stopImmediatePropagation()
     }
@@ -687,7 +876,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     if (
       locksInteraction.value &&
       !eventHitsTutorialControl(event) &&
-      !eventHitsTarget(event) &&
+      !eventHitsActionTarget(event) &&
       !targetElement.value?.contains(document.activeElement)
     ) {
       event.preventDefault()
@@ -742,6 +931,9 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       return
     }
     setTarget(document.querySelector(`[data-tutorial-id="${currentStep.value.targetId}"]`))
+    if (currentStep.value.id === '02-A04' && document.querySelector('[data-tutorial-ground-reward]')) {
+      targetSyncDelayed.value = false
+    }
   }
 
   function observeTarget() {
@@ -770,7 +962,9 @@ export function useTutorialEngine(runtime, fleetRuntime) {
           return
         }
       }
-      if (!targetElement.value) targetSyncDelayed.value = true
+      if (!targetElement.value || (currentStep.value.id === '02-A04' && !document.querySelector('[data-tutorial-ground-reward]'))) {
+        targetSyncDelayed.value = true
+      }
     }, TARGET_DELAY_NOTICE)
   }
 
@@ -782,11 +976,18 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       ? Object.fromEntries(['taskId', 'runId', 'redVolumeId', 'redDiamondId', 'rewindCheckpointId', 'redFineTransactionId', 'pausedByTutorial', 'resumeTimeScale']
         .filter(key => record?.[key] !== undefined)
         .map(key => [key, record[key]]))
-      : {}
+      : chapterId === GROUND_COOP_TUTORIAL_CHAPTER
+        ? Object.fromEntries(['taskId', 'runId'].filter(key => record?.[key]).map(key => [key, record[key]]))
+        : {}
     if (chapterId === TUTORIAL_CHAPTER && !record?.runId) {
       runtime.setTutorialGenerationPreset({ seed: PROLOGUE_TUTORIAL_SEED })
     }
     if (chapterId === TUTORIAL_CHAPTER) configureProloguePresentationGuards(stepId)
+    else if (chapterId === GROUND_COOP_TUTORIAL_CHAPTER) {
+      runtime.clearTutorialRedConflictLocked()
+      runtime.clearTutorialRewindLocked()
+      runtime.setTutorialMissionReactionsSuppressed(true)
+    }
     else {
       runtime.clearTutorialRedConflictLocked()
       runtime.clearTutorialRewindLocked()
@@ -810,10 +1011,18 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     manualAttentionSeen.value = Boolean(parseManualAttentionRecord(
       window.localStorage.getItem(TUTORIAL_ATTENTION_STORAGE_KEY)
     ))
-    const records = Object.fromEntries(TUTORIAL_CHAPTERS.map(chapter => [
-      chapter.id,
-      parseProgressRecord(window.localStorage.getItem(chapter.storageKey), chapter.id)
-    ]))
+    const records = Object.fromEntries(TUTORIAL_CHAPTERS.map(chapter => {
+      const local = parseProgressRecord(window.localStorage.getItem(chapter.storageKey), chapter.id)
+      const server = runtime.tutorialState.value?.items?.find(item => item.tutorialId === chapter.id)
+      const serverStatus = normalizeServerStatus(server?.status)
+      if (!server || String(server.tutorialVersion) !== String(chapter.version) || serverStatus === 'new') return [chapter.id, local]
+      return [chapter.id, {
+        ...(local || createProgressRecord(chapter.steps[0].id, serverStatus, Date.now(), chapter.id)),
+        status: serverStatus,
+        ...(server.taskId ? { taskId: String(server.taskId) } : {}),
+        ...(server.runId ? { runId: String(server.runId) } : {})
+      }]
+    }))
     progressRecords.value = records
 
     const restoredStatuses = Object.fromEntries(TUTORIAL_CHAPTERS.map(chapter => [
@@ -821,7 +1030,7 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       records[chapter.id]?.status || 'new'
     ]))
     const resumable = TUTORIAL_CHAPTERS.find(chapter => {
-      if (!tutorialChapterUnlocked(chapter.id, restoredStatuses)) return false
+      if (!chapterAccessGranted(chapter.id, restoredStatuses)) return false
       if (!canAutoResumeTutorial(records[chapter.id], {
         activeRunId: activeRunId(),
         isTerminal: runtime.isTerminal.value
@@ -849,18 +1058,19 @@ export function useTutorialEngine(runtime, fleetRuntime) {
         activeRunId: activeRunId(),
         rewindCheckpointRestored: progressCheckpointRestored(records[resumable.id]),
         redDetourApplied: progressRedDetourApplied(records[resumable.id]),
-        redDiamondCollected: progressRedDiamondCollected(records[resumable.id])
+        redDiamondCollected: progressRedDiamondCollected(records[resumable.id]),
+        groundEvidence: groundTutorialEvidence()
       })
       resumeChapter(resumable.id, stepId, records[resumable.id])
       return
     }
 
     const next = TUTORIAL_CHAPTERS.find(chapter => (
-      tutorialChapterUnlocked(chapter.id, restoredStatuses) && !records[chapter.id]
+      chapterAccessGranted(chapter.id, restoredStatuses) && !records[chapter.id]
     ))
     const fallback = TUTORIAL_CHAPTERS.find(chapter => (
-      tutorialChapterUnlocked(chapter.id, restoredStatuses) && records[chapter.id]
-    )) || TUTORIAL_CHAPTERS.find(chapter => tutorialChapterUnlocked(chapter.id, restoredStatuses))
+      chapterAccessGranted(chapter.id, restoredStatuses) && records[chapter.id]
+    )) || TUTORIAL_CHAPTERS.find(chapter => chapterAccessGranted(chapter.id, restoredStatuses))
     selectedChapterId.value = (next || resumable || fallback || TUTORIAL_CHAPTERS[0]).id
     // Announce new chapters with the compact beacon. Opening the manual is an
     // explicit user action, so refresh never covers the map by itself.
@@ -901,6 +1111,57 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       completeAction()
     } finally {
       pauseInFlight = false
+    }
+  }
+
+  async function ensureGroundTaskStartedPaused() {
+    if (pauseInFlight || activeChapterId.value !== GROUND_COOP_TUTORIAL_CHAPTER
+      || currentStep.value.id !== '02-A03' || phase.value !== TUTORIAL_PHASES.ACTION
+      || runtime.busy.value || runtime.session.value?.status !== 'RUNNING'
+      || activeMission()?.tutorialId !== GROUND_COOP_TUTORIAL_CHAPTER) return
+    pauseInFlight = true
+    try {
+      const paused = Number(runtime.timeScale.value) === 0 || await runtime.pauseMission()
+      if (!paused) {
+        startFailed.value = true
+        dispatch({ type: 'ACTION_RETRY' })
+        return
+      }
+      progressContext.value = { taskId: activeTaskId(), runId: activeRunId() }
+      recordProgress(GROUND_COOP_TUTORIAL_CHAPTER, 'in_progress', currentStep.value.id)
+      runtime.clearTutorialGenerationPreset()
+      await runtime.refreshTutorialState().catch(() => null)
+      completeAction()
+    } finally {
+      pauseInFlight = false
+    }
+  }
+
+  async function runGroundObservationStep() {
+    if (groundMilestoneInFlight || activeChapterId.value !== GROUND_COOP_TUTORIAL_CHAPTER
+      || phase.value !== TUTORIAL_PHASES.ACTION || !['02-W00-PACE', '02-W01', '02-W02', '02-W03'].includes(currentStep.value.id)
+      || !groundTutorialRunMatches()) return
+    const stepId = currentStep.value.id
+    const evidenceKey = { '02-W01': 'uavTakeoff', '02-W02': 'uavRecovered', '02-W03': 'missionCompleted' }[stepId]
+    const evidence = groundTutorialEvidence()
+    const milestoneReached = stepId === '02-W00-PACE' ? groundPaceDeparted() : Boolean(evidence[evidenceKey])
+    groundMilestoneInFlight = true
+    try {
+      if (!milestoneReached && runtime.session.value?.status === 'RUNNING' && Number(runtime.timeScale.value) !== 5) {
+        await runtime.resumeMission(5)
+        return
+      }
+      if (!milestoneReached) return
+      if (stepId !== '02-W03' && runtime.session.value?.status === 'RUNNING' && Number(runtime.timeScale.value) > 0) {
+        if (!(await runtime.pauseMission())) return
+      }
+      if (stepId === '02-W03') {
+        await runtime.refreshTutorialState().catch(() => null)
+        if (normalizeServerStatus(groundTutorialItem()?.status) !== 'completed') return
+      }
+      if (currentStep.value.id === stepId && phase.value === TUTORIAL_PHASES.ACTION) completeAction()
+    } finally {
+      groundMilestoneInFlight = false
     }
   }
 
@@ -1051,7 +1312,17 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   }
 
   function evaluateCurrentCondition() {
-    if (phase.value !== TUTORIAL_PHASES.ACTION || activeChapterId.value !== TUTORIAL_CHAPTER) return
+    if (phase.value !== TUTORIAL_PHASES.ACTION) return
+    if (activeChapterId.value === GROUND_COOP_TUTORIAL_CHAPTER) {
+      const evidence = groundTutorialEvidence()
+      if (currentStep.value.id === '02-A02' && runtime.selectedBaselineRouteCandidateId.value) completeAction()
+      else if (currentStep.value.id === '02-A03') void ensureGroundTaskStartedPaused()
+      else if (currentStep.value.id === '02-A04' && evidence.routeOutsideReward) completeAction()
+      else if (currentStep.value.id === '02-A05' && evidence.returnedToBaseline) completeAction()
+      else if (['02-W00-PACE', '02-W01', '02-W02', '02-W03'].includes(currentStep.value.id)) void runGroundObservationStep()
+      return
+    }
+    if (activeChapterId.value !== TUTORIAL_CHAPTER) return
     if (normalizeTimelineTutorialState()) return
     if (currentStep.value.id === 'A02') {
       const checked = document.querySelector('[data-tutorial-id="mission-zone-count-four"] input[type="radio"]')?.checked
@@ -1077,11 +1348,19 @@ export function useTutorialEngine(runtime, fleetRuntime) {
   }
 
   watch(() => runtime.initialized.value, hydrateProgress, { immediate: true })
+  watch(() => groundTutorialItem()?.availability, availability => {
+    if (availability === 'AVAILABLE') return
+    const groundPresetActive = runtime.tutorialGenerationPreset.value?.tutorialId === GROUND_COOP_TUTORIAL_CHAPTER
+    if (activeChapterId.value === GROUND_COOP_TUTORIAL_CHAPTER || groundPresetActive) {
+      showLockedGroundTutorial()
+    }
+  }, { flush: 'post' })
   watch(() => [activeChapterId.value, currentStep.value.id, phase.value], () => {
     if (activeChapterId.value === TUTORIAL_CHAPTER && isActive.value) {
       configureProloguePresentationGuards(currentStep.value.id)
       restoreRedCourseOverview(currentStep.value.id)
     }
+    configureGroundTutorialCamera(currentStep.value.id)
     if (isActive.value && ![TUTORIAL_PHASES.INTRO, TUTORIAL_PHASES.COMPLETE].includes(phase.value)) {
       recordProgress(activeChapterId.value, 'in_progress', currentStep.value.id)
     }
@@ -1094,25 +1373,35 @@ export function useTutorialEngine(runtime, fleetRuntime) {
       const chapterId = activeChapterId.value
       if (chapterId === TUTORIAL_CHAPTER) void releaseTutorialPause()
       recordProgress(chapterId, 'completed', steps.value.at(-1).id)
+      void syncCompletedChapter(chapterId)
       manualExpanded.value = false
       clearTransitionTimer()
       transitionTimer = window.setTimeout(
-        () => closeActiveChapter({ promptNext: chapterId === TUTORIAL_CHAPTER }),
+        () => closeActiveChapter({ promptNext: [TUTORIAL_CHAPTER, FLEET_TUTORIAL_CHAPTER].includes(chapterId) }),
         reducedMotion.value ? 500 : COMPLETE_DURATION
       )
     }
   })
   watch(() => runtime.plannerOpen.value, open => {
     if (open && phase.value === TUTORIAL_PHASES.ACTION && currentStep.value.id === 'A01') completeAction()
-    if (!open && activeChapterId.value === TUTORIAL_CHAPTER
-      && PLANNER_DEPENDENT_STEPS.has(currentStep.value.id)) window.setTimeout(() => {
-      if (activeChapterId.value !== TUTORIAL_CHAPTER || runtime.plannerOpen.value) return
-      if (currentStep.value.id === 'A04' && activeTaskId() === String(progressContext.value.taskId || '')) {
-        void ensureStartedTaskPaused()
-        return
-      }
-      rewindToAction('A01')
-    }, 0)
+    if (!open && ((activeChapterId.value === TUTORIAL_CHAPTER && PLANNER_DEPENDENT_STEPS.has(currentStep.value.id))
+      || (activeChapterId.value === GROUND_COOP_TUTORIAL_CHAPTER && GROUND_COOP_PLANNER_STEPS.has(currentStep.value.id)))) window.setTimeout(() => {
+        if (runtime.plannerOpen.value) return
+        if (activeChapterId.value === TUTORIAL_CHAPTER) {
+          if (currentStep.value.id === 'A04' && activeTaskId() === String(progressContext.value.taskId || '')) {
+            void ensureStartedTaskPaused()
+            return
+          }
+          rewindToAction('A01')
+        } else if (activeChapterId.value === GROUND_COOP_TUTORIAL_CHAPTER) {
+          if (currentStep.value.id === '02-A03' && activeMission()?.tutorialId === GROUND_COOP_TUTORIAL_CHAPTER) {
+            void ensureGroundTaskStartedPaused()
+            return
+          }
+          runtime.startGroundTutorial()
+          rewindToAction('02-A01')
+        }
+      }, 0)
   })
   watch(() => fleetRuntime?.isOpen.value, open => {
     if (open && phase.value === TUTORIAL_PHASES.ACTION && currentStep.value.id === 'F01-A01') completeAction()
@@ -1121,17 +1410,25 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     }
   })
   watch([() => runtime.busy.value, () => runtime.taskPreview.value], ([busy, preview]) => {
-    if (currentStep.value.id !== 'A03' || phase.value !== TUTORIAL_PHASES.ACTION || !state.value.waiting) return
+    if (!['A03', '02-A01'].includes(currentStep.value.id) || phase.value !== TUTORIAL_PHASES.ACTION || !state.value.waiting) return
     if (busy) {
       generationStarted = true
       return
     }
     if (!generationStarted) return
     if (preview && preview !== previewBeforeAction) {
-      captureTaskContext(preview)
-      const issue = tutorialFleetIssue(fleetRuntime.snapshot.value, preview)
-      if (issue) void routeToFleetRecovery(issue)
-      else completeAction()
+      if (currentStep.value.id === '02-A01') {
+        if (preview?.plan?.tutorialId === GROUND_COOP_TUTORIAL_CHAPTER) completeAction()
+        else {
+          generationFailed.value = true
+          dispatch({ type: 'ACTION_RETRY' })
+        }
+      } else {
+        captureTaskContext(preview)
+        const issue = tutorialFleetIssue(fleetRuntime.snapshot.value, preview)
+        if (issue) void routeToFleetRecovery(issue)
+        else completeAction()
+      }
     }
     else {
       generationFailed.value = true
@@ -1145,8 +1442,18 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     () => runtime.session.value?.taskInstanceId,
     () => runtime.session.value?.status
   ], ([busy]) => {
-    if (currentStep.value.id !== 'A04' || phase.value !== TUTORIAL_PHASES.ACTION || !state.value.waiting) return
+    if (!['A04', '02-A03'].includes(currentStep.value.id) || phase.value !== TUTORIAL_PHASES.ACTION || !state.value.waiting) return
     if (busy) return
+    if (currentStep.value.id === '02-A03') {
+      if (activeMission()?.tutorialId === GROUND_COOP_TUTORIAL_CHAPTER && runtime.session.value?.status === 'RUNNING') {
+        void ensureGroundTaskStartedPaused()
+      } else if (startActionStarted) {
+        startFailed.value = true
+        startActionStarted = false
+        dispatch({ type: 'ACTION_RETRY' })
+      }
+      return
+    }
     if (activeTaskId() === String(progressContext.value.taskId || '') && runtime.session.value?.status === 'RUNNING') {
       void ensureStartedTaskPaused()
     } else if (startActionStarted) {
@@ -1216,6 +1523,15 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     }
   }, { flush: 'post' })
   watch(() => (activeMission()?.economy?.collectedDiamondIds || []).map(String).join('|'), evaluateCurrentCondition)
+  watch([
+    () => JSON.stringify(activeMission()?.groundRouting?.tutorialEvidence || {}),
+    () => activeMission()?.groundRouting?.activeTemporaryTarget?.targetId,
+    () => activeMission()?.paceVehicle?.status,
+    () => Math.ceil(Number(activeMission()?.paceVehicle?.departureCountdownSeconds || 0)),
+    () => runtime.selectedBaselineRouteCandidateId.value,
+    () => groundTutorialItem()?.status,
+    () => runtime.session.value?.status
+  ], evaluateCurrentCondition, { flush: 'post' })
   watch([
     () => runtime.session.value?.status,
     () => activeMission()?.terminalReason
@@ -1296,9 +1612,14 @@ export function useTutorialEngine(runtime, fleetRuntime) {
     speaker,
     expression,
     chapterPreparing,
+    skipConfirmOpen: readonly(skipConfirmOpen),
+    skipError: readonly(skipError),
+    skipInFlight: readonly(skipInFlight),
     selectChapter,
     startTutorial,
     skipTutorial,
+    confirmSkipTutorial,
+    cancelSkipTutorial,
     toggleManual,
     advanceDialogue
   }

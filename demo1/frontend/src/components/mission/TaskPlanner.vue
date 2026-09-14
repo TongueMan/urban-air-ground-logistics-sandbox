@@ -4,7 +4,7 @@
       <div class="title-group">
         <span class="instrument-kicker">DELIVERY TASK SETUP</span>
         <h2>{{ taskTitle }}</h2>
-        <div class="mission-tags"><span>车机协同</span><span v-if="preview">{{ riskLabel }}</span></div>
+        <div class="mission-tags"><span>车机协同</span><span v-if="tutorialMode">资格认证</span><span v-else-if="advancedMode">进阶规划</span><span v-if="preview">{{ riskLabel }}</span></div>
       </div>
       <div class="header-actions">
         <span class="readiness" :class="{ 'is-busy': runtime.busy.value, 'is-ready': preview && !runtime.busy.value }"><i></i>{{ readinessLabel }}</span>
@@ -16,14 +16,14 @@
       <section class="area-section" aria-labelledby="area-heading">
         <div class="section-heading"><span id="area-heading">运营区域</span><small v-if="routeEndpointLabel">{{ routeEndpointLabel }}</small></div>
         <div class="area-picker">
-          <select v-model="form.scenarioTemplateId" data-tutorial-id="mission-area" aria-label="选择物流运营区" @change="applyTemplateDefaults">
-            <option v-for="item in runtime.scenarioTemplates.value" :key="item.id" :value="item.id">{{ item.name }}</option>
+          <select v-model="form.scenarioTemplateId" data-tutorial-id="mission-area" aria-label="选择物流运营区" :disabled="advancedMode" @change="applyTemplateDefaults">
+            <option v-for="item in availableTemplates" :key="item.id" :value="item.id">{{ item.name }}</option>
           </select>
           <span aria-hidden="true">⌄</span>
         </div>
       </section>
 
-      <section class="zone-count-section" aria-labelledby="zone-count-heading">
+      <section v-if="!tutorialMode" class="zone-count-section" aria-labelledby="zone-count-heading">
         <div class="section-heading">
           <span id="zone-count-heading">禁飞区数量</span>
           <small>每局从红、黄、紫、橙空域中抽取</small>
@@ -35,8 +35,22 @@
           </label>
         </div>
       </section>
+      <section v-else class="tutorial-brief" aria-label="教程 02 练习规则">
+        <strong>教学环境已固定</strong>
+        <span>使用标准三轮车与轻型配送无人机；关闭空域干扰和经营结算，只考核选路、绕行、返回基线与车机回收。</span>
+      </section>
 
       <div v-if="preview" :key="preview.taskId" class="briefing-content" data-tutorial-id="mission-preview" aria-live="polite">
+        <section v-if="advancedMode" class="route-candidates" data-tutorial-id="mission-route-candidates" aria-labelledby="route-candidate-heading">
+          <div class="section-heading"><span id="route-candidate-heading">选择执行基线</span><small>开始前必须选择 A / B / C</small></div>
+          <div class="candidate-grid" role="radiogroup" aria-label="候选地面路线">
+            <label v-for="candidate in routeCandidates" :key="candidate.candidateId" :class="{ selected: selectedCandidateId === candidate.candidateId }" :style="{ '--candidate-color': candidate.color }">
+              <input v-model="selectedCandidateId" type="radio" name="baseline-route" :value="candidate.candidateId">
+              <b>{{ candidate.label }}</b><span>{{ Math.round(Number(candidate.distanceMeters || 0)).toLocaleString('zh-CN') }} m</span>
+            </label>
+          </div>
+          <p v-if="preview?.plan?.tutorialId" class="tutorial-route-hint">教程目标：选定一条基线后启动；运行中点击一处不在该基线上的地面奖励，再使用“返回计划路线”，完成无人机起飞与回收。</p>
+        </section>
         <section class="mission-metrics" aria-label="任务核心指标">
           <article class="metric metric-ground">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h11v9H3zM14 10h3l3 3v3h-6zM6 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm11 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z" /></svg>
@@ -56,19 +70,27 @@
           </article>
         </section>
 
-        <section class="reward-section" aria-labelledby="reward-heading">
+        <section v-if="!tutorialMode" class="reward-section" aria-labelledby="reward-heading">
           <div class="reward-heading-row">
             <div><span class="section-kicker">REWARD</span><h3 id="reward-heading">本次任务收益</h3></div>
             <div class="reward-hero"><small>预计可得</small><strong>{{ formatMoney(estimatedGrossRewardMinor) }}</strong></div>
           </div>
-          <div class="reward-breakdown">
+          <div class="reward-breakdown" :class="{ 'has-trophy': advancedMode }">
             <div><span>配送收益</span><b>{{ formatMoney(deliveryRewardMinor) }}</b></div>
+            <div v-if="advancedMode" class="trophy-reward"><span>奖杯收益</span><b>+{{ formatMoney(trophyRewardMinor) }}</b></div>
             <div><span>预计时效</span><b>+{{ formatMoney(timelinessRewardMinor) }}</b></div>
             <div class="diamond-reward"><span><i>◆</i> 挑战潜力</span><b>+{{ formatMoney(diamondPotentialMinor) }}</b></div>
           </div>
         </section>
+        <section v-else class="reward-section tutorial-settlement" aria-labelledby="reward-heading">
+          <div class="reward-heading-row">
+            <div><span class="section-kicker">CERTIFICATION RUN</span><h3 id="reward-heading">教程练习不计经营收益</h3></div>
+            <div class="reward-hero"><small>本次结算</small><strong>¥0</strong></div>
+          </div>
+          <p>地图中的地面奖励用于练习实时调度，不会重复发放公司资金。</p>
+        </section>
 
-        <section class="challenge-section" :class="{ 'has-challenge': diamondCount }" aria-labelledby="challenge-heading">
+        <section v-if="!tutorialMode" class="challenge-section" :class="{ 'has-challenge': diamondCount }" aria-labelledby="challenge-heading">
           <div class="challenge-copy">
             <span class="section-kicker">CHALLENGE</span>
             <h3 id="challenge-heading">{{ diamondCount ? '本局粉钻目标' : '常规空域任务' }}</h3>
@@ -103,16 +125,16 @@
 
       <div v-else class="empty-briefing">
         <div class="route-symbol" aria-hidden="true"><i></i><span></span><i></i></div>
-        <strong>选择区域，生成一局配送任务</strong>
-        <p>路线、配送目标、奖励点与空域挑战会同步出现在地图上。</p>
-        <button class="empty-generate" type="button" data-tutorial-id="generate-mission" :disabled="runtime.busy.value || !form.scenarioTemplateId" @click="generate">{{ runtime.busy.value ? '正在规划路线…' : '生成本局任务' }}</button>
+        <strong>{{ tutorialMode ? '生成教程 02 资格认证路线' : '选择区域，生成一局配送任务' }}</strong>
+        <p>{{ tutorialMode ? '系统将固定教学运力并生成三条候选路线，玩家选择基线后开始实时调度练习。' : '路线、配送目标、奖励点与空域挑战会同步出现在地图上。' }}</p>
+        <button class="empty-generate" type="button" data-tutorial-id="generate-mission" :disabled="runtime.busy.value || !form.scenarioTemplateId" @click="generate">{{ runtime.busy.value ? '正在规划路线…' : tutorialMode ? '生成认证路线' : '生成本局任务' }}</button>
       </div>
     </div>
 
     <footer v-if="preview" class="planner-footer">
       <div class="secondary-actions"><button type="button" data-tutorial-id="generate-mission" :disabled="runtime.busy.value || !form.scenarioTemplateId" @click="generate"><span aria-hidden="true">↻</span> {{ runtime.busy.value ? '正在规划…' : '换一个任务' }}</button></div>
-      <div class="maximum-reward"><span>最高可得</span><strong>{{ formatMoney(maximumGrossRewardMinor) }}</strong></div>
-      <button class="start" type="button" data-tutorial-id="start-mission" :disabled="runtime.busy.value || !previewMatchesForm" @click="start">{{ previewMatchesForm ? '开始配送' : '请先重新生成' }} <span aria-hidden="true">→</span></button>
+      <div class="maximum-reward"><span>{{ tutorialMode ? '教学结算' : '最高可得' }}</span><strong>{{ tutorialMode ? '¥0' : formatMoney(maximumGrossRewardMinor) }}</strong></div>
+      <button class="start" type="button" data-tutorial-id="start-mission" :disabled="runtime.busy.value || !canStart" @click="start">{{ canStart ? '开始配送' : advancedMode && !selectedCandidateId ? '请选择基线' : '请先重新生成' }} <span aria-hidden="true">→</span></button>
     </footer>
   </section>
 </template>
@@ -124,14 +146,28 @@ const props = defineProps({ runtime: { type: Object, required: true } })
 const runtime = props.runtime
 const form = reactive({ scenarioTemplateId: '', parameters: { airspaceThemeCount: 2 } })
 const preview = computed(() => runtime.taskPreview.value)
+const advancedMode = computed(() => runtime.planningMode.value === 'ADVANCED')
+const tutorialMode = computed(() => runtime.tutorialGenerationPreset.value?.tutorialId === 'TUTORIAL-02-GROUND-COOP')
+const availableTemplates = computed(() => advancedMode.value
+  ? runtime.scenarioTemplates.value.filter(item => item.id === 'hefei-hfut-feicui-campus')
+  : runtime.scenarioTemplates.value)
+const routeCandidates = computed(() => preview.value?.plan?.routeCandidates || [])
+const selectedCandidateId = computed({
+  get: () => runtime.selectedBaselineRouteCandidateId.value,
+  set: value => { runtime.selectedBaselineRouteCandidateId.value = String(value || '') }
+})
 const selectedTemplate = computed(() => runtime.scenarioTemplates.value.find(item => item.id === form.scenarioTemplateId))
 const previewMatchesForm = computed(() => {
   const current = preview.value
   if (!current || current.scenarioTemplateId !== form.scenarioTemplateId) return false
   const resolved = current.resolvedParameters || current.plan?.resolvedParameters || {}
   return Number(resolved.airspaceThemeCount) === Number(form.parameters.airspaceThemeCount)
+    && String(current.plan?.planningMode || 'BASIC') === runtime.planningMode.value
+    && String(current.plan?.tutorialId || '') === String(runtime.tutorialGenerationPreset.value?.tutorialId || '')
 })
+const canStart = computed(() => previewMatchesForm.value && (!advancedMode.value || Boolean(selectedCandidateId.value)))
 const economyQuote = computed(() => preview.value?.plan?.economyQuote || {})
+const groundRewards = computed(() => preview.value?.plan?.groundRewards || [])
 const groundVehicle = computed(() => preview.value?.plan?.groundVehicle || null)
 const airVehicle = computed(() => preview.value?.plan?.airVehicle || null)
 const deliveryPoints = computed(() => preview.value?.plan?.deliveryPoints || [])
@@ -152,12 +188,31 @@ const airBatteryRangeLabel = computed(() => {
 })
 const groundBatterySufficient = computed(() => economyQuote.value.groundBatterySufficient ?? economyQuote.value.batterySufficient ?? true)
 const airBatterySufficient = computed(() => economyQuote.value.airBatterySufficient !== false)
-const deliveryRewardMinor = computed(() => Number(economyQuote.value.groundCargoRewardMinor ?? economyQuote.value.baseGroundRewardMinor ?? 0) + Number(economyQuote.value.airCargoRewardMinor ?? economyQuote.value.airCoinRewardMinor ?? 0))
+const selectedGroundRewards = computed(() => {
+  if (!advancedMode.value || !selectedCandidateId.value) return []
+  return groundRewards.value.filter(reward => (reward.eligibleCandidateIds || []).map(String).includes(selectedCandidateId.value))
+})
+const selectedGroundCoinRewardMinor = computed(() => selectedGroundRewards.value
+  .filter(reward => String(reward.rewardType || '').toUpperCase() !== 'GROUND_TROPHY')
+  .reduce((sum, reward) => sum + Number(reward.rewardMinor || 0), 0))
+const selectedTrophyRewardMinor = computed(() => selectedGroundRewards.value
+  .filter(reward => String(reward.rewardType || '').toUpperCase() === 'GROUND_TROPHY')
+  .reduce((sum, reward) => sum + Number(reward.rewardMinor || 0), 0))
+const airDeliveryRewardMinor = computed(() => Number(economyQuote.value.airCargoRewardMinor ?? economyQuote.value.airCoinRewardMinor ?? 0))
+const deliveryRewardMinor = computed(() => advancedMode.value && selectedCandidateId.value
+  ? selectedGroundCoinRewardMinor.value + airDeliveryRewardMinor.value
+  : Number(economyQuote.value.groundCoinRewardMinor ?? economyQuote.value.groundCargoRewardMinor ?? economyQuote.value.baseGroundRewardMinor ?? 0) + airDeliveryRewardMinor.value)
+const trophyRewardMinor = computed(() => advancedMode.value && selectedCandidateId.value
+  ? selectedTrophyRewardMinor.value
+  : Number(economyQuote.value.groundTrophyRewardMinor || 0))
 const timelinessRewardMinor = computed(() => Number(economyQuote.value.estimatedTimelinessRewardMinor || 0))
 const diamondPotentialMinor = computed(() => Number(economyQuote.value.diamondPotentialMinor || primaryChallenge.value?.rewardMinor || 0))
-const estimatedGrossRewardMinor = computed(() => Number(economyQuote.value.estimatedGrossRewardMinor ?? (deliveryRewardMinor.value + timelinessRewardMinor.value + diamondPotentialMinor.value)))
+const estimatedGrossRewardMinor = computed(() => advancedMode.value && selectedCandidateId.value
+  ? deliveryRewardMinor.value + trophyRewardMinor.value + timelinessRewardMinor.value + diamondPotentialMinor.value
+  : Number(economyQuote.value.estimatedGrossRewardMinor ?? (deliveryRewardMinor.value + trophyRewardMinor.value + timelinessRewardMinor.value + diamondPotentialMinor.value)))
 const maximumGrossRewardMinor = computed(() => Number(economyQuote.value.maximumGrossRewardMinor ?? economyQuote.value.grossRewardMinor ?? estimatedGrossRewardMinor.value))
 const taskTitle = computed(() => {
+  if (tutorialMode.value) return '教程 02 · 联合配送资格认证'
   const area = String(selectedTemplate.value?.name || preview.value?.plan?.name || '联合配送任务').replace(/·动态车机协同配送$/, '').replace(/物流运营区/g, '').replace(/·/g, ' · ')
   return area.includes('联合配送') ? area : `${area}联合配送`
 })
@@ -204,6 +259,8 @@ async function generate() {
     await runtime.generateTask({
       scenarioTemplateId: form.scenarioTemplateId,
       seed: runtime.tutorialGenerationPreset.value?.seed || null,
+      planningMode: runtime.planningMode.value,
+      tutorialId: runtime.tutorialGenerationPreset.value?.tutorialId || null,
       parameters: {
         ...form.parameters,
         tutorialBatteryProtected: Boolean(runtime.tutorialGenerationPreset.value)
@@ -214,15 +271,17 @@ async function generate() {
   }
 }
 async function start() {
-  if (!previewMatchesForm.value) return
+  if (!canStart.value) return
   try {
     await runtime.startPreview()
   } catch {
     // Runtime notice remains visible and the tutorial keeps this action retryable.
   }
 }
-watch(() => runtime.scenarioTemplates.value, items => {
-  if (!form.scenarioTemplateId && items.length) { form.scenarioTemplateId = items[0].id; applyTemplateDefaults() }
+watch([() => runtime.scenarioTemplates.value, () => runtime.planningMode.value], ([items]) => {
+  const choices = availableTemplates.value
+  if (!choices.some(item => item.id === form.scenarioTemplateId)) form.scenarioTemplateId = choices[0]?.id || ''
+  if (form.scenarioTemplateId) applyTemplateDefaults()
 }, { immediate: true })
 </script>
 
@@ -233,7 +292,9 @@ watch(() => runtime.scenarioTemplates.value, items => {
 .planner-scroll{min-height:0;flex:1;padding:16px 20px 22px 22px;overflow:auto;scrollbar-width:thin;scrollbar-color:rgba(124,231,238,.3) transparent}.area-section{margin-bottom:19px}.section-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;color:var(--text-secondary);font-size:.69rem}.section-heading small{max-width:65%;overflow:hidden;color:#75b6c2;font-size:.62rem;text-overflow:ellipsis;white-space:nowrap}.area-picker{position:relative}.area-picker select{width:100%;min-height:41px;appearance:none;padding:0 34px 0 0;border:0;border-bottom:1px solid rgba(172,217,227,.19);border-radius:0;color:var(--text-primary);background:transparent;font-size:.76rem;outline:none}.area-picker select:focus{border-bottom-color:var(--signal-mint)}.area-picker>span{position:absolute;right:5px;top:8px;color:var(--signal-primary);pointer-events:none}.briefing-content{animation:content-refresh 360ms var(--motion-ease-out)}
 .zone-count-section{margin:-2px 0 20px}.zone-count-picker{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.zone-count-picker label{min-height:42px;display:flex;align-items:center;justify-content:center;gap:3px;border:1px solid rgba(154,205,224,.14);border-radius:var(--radius-control);color:var(--text-secondary);background:rgba(8,28,39,.55);cursor:pointer;transition:border-color var(--motion-fast),background var(--motion-fast),color var(--motion-fast)}.zone-count-picker label:hover{border-color:rgba(126,240,196,.35)}.zone-count-picker label.selected{border-color:rgba(126,240,196,.7);color:var(--signal-mint);background:rgba(43,126,102,.18);box-shadow:inset 0 0 18px rgba(126,240,196,.05)}.zone-count-picker input{position:absolute;opacity:0;pointer-events:none}.zone-count-picker strong{font-size:1rem;font-weight:650}.zone-count-picker span{font-size:.62rem}.zone-count-picker label:focus-within{outline:2px solid rgba(126,240,196,.55);outline-offset:2px}
 .mission-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:2px 0 20px;border-bottom:1px solid rgba(172,217,227,.1)}.metric{position:relative;min-width:0;display:grid;grid-template-columns:17px 1fr;align-items:center;gap:1px 7px;padding-left:2px}.metric:not(:last-child)::after{content:"";position:absolute;right:-4px;top:7px;bottom:7px;border-right:1px solid rgba(172,217,227,.09)}.metric svg{grid-row:1/3;width:16px;fill:none;stroke:var(--metric-color,var(--signal-primary));stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}.metric-ground svg{fill:rgba(124,231,238,.16)}.metric strong{overflow:hidden;font-size:1.25rem;font-weight:520;line-height:1.1;font-variant-numeric:tabular-nums;text-overflow:ellipsis}.metric span{color:var(--text-tertiary);font-size:.58rem;white-space:nowrap}.metric-ground{--metric-color:#75deea}.metric-air{--metric-color:var(--signal-mint)}.metric-airspace{--metric-color:#f48bb5}.metric-time{--metric-color:#c9d9dc}
-.section-kicker{color:var(--text-tertiary);font-size:.57rem;font-weight:800;letter-spacing:.18em}.reward-section{padding:20px 0 18px;border-bottom:1px solid rgba(172,217,227,.1)}.reward-heading-row{display:flex;justify-content:space-between;align-items:flex-end;gap:16px}.reward-heading-row h3,.challenge-copy h3{margin:4px 0 0;font-size:.82rem;font-weight:620}.reward-hero{text-align:right}.reward-hero small{display:block;margin-bottom:3px;color:#ad9b69;font-size:.6rem}.reward-hero strong{display:block;color:#ffe494;font-size:1.85rem;font-weight:620;line-height:1;font-variant-numeric:tabular-nums;text-shadow:0 0 24px rgba(255,207,91,.13)}.reward-breakdown{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}.reward-breakdown>div{display:grid;gap:4px}.reward-breakdown span{color:var(--text-tertiary);font-size:.61rem}.reward-breakdown b{color:#d7e6e8;font-size:.75rem;font-weight:570;font-variant-numeric:tabular-nums}.reward-breakdown .diamond-reward span,.reward-breakdown .diamond-reward b{color:#f18dcc}.diamond-reward i{font-style:normal;font-size:.57rem}
+.route-candidates{padding:2px 0 18px}.candidate-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.candidate-grid label{position:relative;display:grid;gap:5px;min-height:50px;padding:10px;border:1px solid color-mix(in srgb,var(--candidate-color) 30%,transparent);border-radius:5px;color:var(--text-secondary);background:rgba(5,20,29,.72);cursor:pointer}.candidate-grid label::before{content:"";position:absolute;inset:0 auto 0 0;width:3px;background:var(--candidate-color)}.candidate-grid label.selected{color:#fff;border-color:var(--candidate-color);box-shadow:0 0 18px color-mix(in srgb,var(--candidate-color) 18%,transparent)}.candidate-grid input{position:absolute;opacity:0}.candidate-grid b{font-size:.72rem}.candidate-grid span{font-size:.6rem;font-variant-numeric:tabular-nums}
+.tutorial-route-hint{margin:10px 0 0;padding:8px 10px;border-left:2px solid #ffd166;color:#e7d8a4;background:rgba(75,54,10,.18);font-size:.61rem;line-height:1.55}
+.section-kicker{color:var(--text-tertiary);font-size:.57rem;font-weight:800;letter-spacing:.18em}.reward-section{padding:20px 0 18px;border-bottom:1px solid rgba(172,217,227,.1)}.reward-heading-row{display:flex;justify-content:space-between;align-items:flex-end;gap:16px}.reward-heading-row h3,.challenge-copy h3{margin:4px 0 0;font-size:.82rem;font-weight:620}.reward-hero{text-align:right}.reward-hero small{display:block;margin-bottom:3px;color:#ad9b69;font-size:.6rem}.reward-hero strong{display:block;color:#ffe494;font-size:1.85rem;font-weight:620;line-height:1;font-variant-numeric:tabular-nums;text-shadow:0 0 24px rgba(255,207,91,.13)}.reward-breakdown{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px}.reward-breakdown.has-trophy{grid-template-columns:repeat(4,1fr)}.reward-breakdown>div{display:grid;gap:4px}.reward-breakdown span{color:var(--text-tertiary);font-size:.61rem}.reward-breakdown b{color:#d7e6e8;font-size:.75rem;font-weight:570;font-variant-numeric:tabular-nums}.reward-breakdown .trophy-reward span,.reward-breakdown .trophy-reward b{color:#ffd76f}.reward-breakdown .diamond-reward span,.reward-breakdown .diamond-reward b{color:#f18dcc}.diamond-reward i{font-style:normal;font-size:.57rem}
 .challenge-section{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(138px,.65fr);gap:16px;padding:20px 0}.challenge-section.has-challenge{background:radial-gradient(circle at 92% 35%,rgba(226,68,153,.09),transparent 40%)}.challenge-copy p{max-width:270px;margin:9px 0 0;color:#a7bac0;font-size:.68rem;line-height:1.65}.risk-reward{display:grid;gap:9px;padding-left:13px;border-left:1px solid rgba(240,117,180,.2)}.risk-reward>div{display:grid;gap:2px}.risk-reward span{color:var(--text-tertiary);font-size:.58rem}.risk-reward strong{font-size:.74rem;font-weight:650;font-variant-numeric:tabular-nums}.risk-reward small{color:#b98494;font-size:.57rem}.challenge-gain strong{color:#f18dcc}.challenge-risk strong{color:#efc4cb}.readiness-warning{display:grid;gap:5px;margin:0 0 16px;padding:10px 12px;border-left:2px solid var(--signal-critical);color:#e7bfc3;background:rgba(100,28,37,.18);font-size:.64rem;line-height:1.5}.readiness-warning strong{color:#ffd8dc;font-size:.69rem}
 .advanced-section{border-top:1px solid rgba(172,217,227,.1)}.advanced-toggle{width:100%;min-height:42px;display:flex;justify-content:space-between;align-items:center;padding:0;border:0;color:var(--text-secondary);background:transparent;font-size:.68rem;text-align:left}.advanced-toggle>span{font-weight:650}.advanced-toggle i{margin-right:6px;color:var(--signal-primary);font-style:normal}.advanced-toggle b{color:var(--text-tertiary);font-size:.59rem;font-weight:500}.advanced-toggle b span{display:inline-block;margin-left:4px;transition:transform var(--motion-fast)}.advanced-toggle[aria-expanded="true"] b span{transform:rotate(180deg)}.advanced-fields{display:grid;gap:18px;padding:8px 0 4px;animation:advanced-open var(--motion-standard) var(--motion-ease-out)}.advanced-group{display:grid;gap:10px}.advanced-title{color:#73909a;font-size:.59rem;font-weight:750;letter-spacing:.14em;text-transform:uppercase}.advanced-group label,.developer-details label{display:grid;gap:6px;color:var(--text-secondary);font-size:.67rem}.advanced-group select,.seed-field input{box-sizing:border-box;width:100%;min-height:35px;padding:0 9px;border:1px solid rgba(154,205,224,.16);border-radius:var(--radius-control);color:var(--text-primary);background:rgba(8,28,39,.82)}.range-field>span{display:flex;justify-content:space-between}.range-field b{color:var(--signal-primary);font-weight:550}.range-field input{width:100%;height:16px;accent-color:var(--signal-mint)}.switch-field{grid-template-columns:1fr auto;align-items:center}.switch-field>span{display:grid;gap:3px}.switch-field small,.developer-details label small{color:var(--text-tertiary);font-size:.58rem}.switch-field input{width:17px;height:17px;accent-color:var(--signal-mint)}.vehicle-detail{display:grid;gap:5px;padding:9px 0;border-top:1px solid rgba(172,217,227,.08)}.vehicle-detail>div{display:flex;justify-content:space-between;gap:10px}.vehicle-detail span{color:var(--text-tertiary);font-size:.62rem}.vehicle-detail b{overflow:hidden;font-size:.67rem;font-weight:580;text-overflow:ellipsis;white-space:nowrap}.vehicle-detail small{color:#8ea5ad;font-size:.59rem;line-height:1.45}.route-summary dl,.developer-details dl{display:grid;gap:8px;margin:0}.route-summary dl>div,.developer-details dl>div{display:grid;grid-template-columns:80px 1fr;gap:12px}.route-summary dt,.developer-details dt{color:var(--text-tertiary);font-size:.61rem}.route-summary dd,.developer-details dd{min-width:0;margin:0;overflow:hidden;color:#c6d7da;font-size:.61rem;text-align:right;text-overflow:ellipsis;white-space:nowrap}.fallback-note{margin:0;color:#e0b97e;font-size:.6rem;line-height:1.5}.developer-details{padding:10px 12px;border-radius:var(--radius-control);background:rgba(1,8,13,.25)}.developer-details summary{color:var(--text-tertiary);font-size:.61rem;cursor:pointer}.developer-details[open]{display:grid;gap:12px}.seed-field{display:grid;grid-template-columns:1fr auto}.seed-field button{min-width:56px;border:1px solid rgba(124,231,238,.2);border-radius:0 var(--radius-control) var(--radius-control) 0;color:var(--signal-primary);background:rgba(9,34,45,.9);font-size:.62rem}
 .fleet-summary{display:grid;gap:2px;padding-top:15px;border-top:1px solid rgba(172,217,227,.1)}
@@ -243,5 +304,6 @@ watch(() => runtime.scenarioTemplates.value, items => {
 @media(max-width:1350px){.task-planner{inset:82px auto 16px 16px;width:420px}.planner-header{padding:17px 17px 15px 19px}.planner-scroll{padding:14px 17px 18px 19px}.planner-footer{padding:11px 17px 12px 19px}.title-group h2{font-size:1.03rem}.metric{grid-template-columns:15px 1fr;gap:1px 5px}.metric strong{font-size:1.08rem}.reward-hero strong{font-size:1.58rem}.challenge-section{gap:12px}.start{min-width:130px}}
 @media(max-height:820px) and (min-width:1100px){.task-planner{inset:78px auto 12px 14px;width:406px}.planner-header{padding-top:14px;padding-bottom:12px}.mission-tags{display:none}.planner-scroll{padding-top:12px}.area-section{margin-bottom:12px}.mission-metrics{padding-bottom:12px}.reward-section{padding:13px 0 12px}.reward-breakdown{margin-top:12px}.challenge-section{padding:12px 0}.challenge-copy p{margin-top:6px;line-height:1.5}.advanced-toggle{min-height:36px}.planner-footer{padding-top:9px;padding-bottom:9px}.start{min-height:39px}}
 @media(prefers-reduced-motion:reduce){.task-planner,.briefing-content,.advanced-fields,.readiness.is-busy i{animation:none}.start{transition:none}}
+.tutorial-brief{display:grid;gap:6px;margin:-2px 0 20px;padding:12px 14px;border-left:2px solid #ffd166;color:#d8e6e8;background:rgba(75,54,10,.18)}.tutorial-brief strong{color:#ffe09a;font-size:.72rem}.tutorial-brief span,.tutorial-settlement p{margin:0;color:#aebfc2;font-size:.65rem;line-height:1.6}.tutorial-settlement{border-bottom:1px solid rgba(172,217,227,.1)}
 .vehicle-detail .risk-energy{color:#d9bc68}
 </style>

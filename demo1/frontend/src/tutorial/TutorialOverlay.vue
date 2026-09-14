@@ -13,6 +13,7 @@
         'is-action-mode': engine.isActionMode.value,
         'is-device-follow-step': ['D11-DEVICE', 'A04-FOLLOW'].includes(engine.currentStep.value.id),
         'is-timeline-step': ['WAIT-RED-VIOLATION', 'D13-REWIND', 'A07-CHECKPOINT', 'A08-RESTORE'].includes(engine.currentStep.value.id),
+        'is-dialogue-avoiding-target': dialogueAvoidsTarget,
         'is-reduced-motion': engine.reducedMotion.value
       },
       `phase-${engine.phase.value.toLowerCase()}`
@@ -37,6 +38,16 @@
         :attention="engine.beaconAttention.value"
         @open="engine.toggleManual"
       />
+      <section v-if="engine.skipConfirmOpen.value" class="tutorial-skip-confirm" data-tutorial-control role="dialog" aria-modal="true" aria-labelledby="tutorial-skip-title-idle">
+        <span>MISSION MANUAL / CHAPTER 02</span>
+        <strong id="tutorial-skip-title-idle">确认跳过联合配送资格认证？</strong>
+        <p>教学预览会被丢弃，然后记录为已跳过并解锁进阶规划。</p>
+        <p v-if="engine.skipError.value" class="skip-error" role="alert">{{ engine.skipError.value }}</p>
+        <div>
+          <button type="button" :disabled="engine.skipInFlight.value" @click="engine.cancelSkipTutorial">取消</button>
+          <button type="button" class="confirm" :disabled="engine.skipInFlight.value" @click="engine.confirmSkipTutorial">{{ engine.skipInFlight.value ? '正在处理…' : '确认跳过并解锁' }}</button>
+        </div>
+      </section>
     </template>
 
     <template v-else>
@@ -104,6 +115,17 @@
         @click="engine.skipTutorial()"
       >{{ skipLabel }}</button>
 
+      <section v-if="engine.skipConfirmOpen.value" class="tutorial-skip-confirm" data-tutorial-control role="dialog" aria-modal="true" aria-labelledby="tutorial-skip-title">
+        <span>MISSION MANUAL / CHAPTER 02</span>
+        <strong id="tutorial-skip-title">确认跳过联合配送资格认证？</strong>
+        <p>{{ activeGroundRun ? '当前教学任务会先被中止，然后记录为已跳过并解锁进阶规划。' : '教学预览会被丢弃，然后记录为已跳过并解锁进阶规划。' }}</p>
+        <p v-if="engine.skipError.value" class="skip-error" role="alert">{{ engine.skipError.value }}</p>
+        <div>
+          <button type="button" :disabled="engine.skipInFlight.value" @click="engine.cancelSkipTutorial">取消</button>
+          <button type="button" class="confirm" :disabled="engine.skipInFlight.value" @click="engine.confirmSkipTutorial">{{ engine.skipInFlight.value ? '正在处理…' : '确认跳过并解锁' }}</button>
+        </div>
+      </section>
+
       <section v-if="engine.phase.value === TUTORIAL_PHASES.INTRO" class="tutorial-intro" :aria-label="`${engine.currentChapter.value.title}开始`">
         <span>{{ engine.currentChapter.value.introKicker }}</span>
         <strong>{{ engine.currentChapter.value.title }}</strong>
@@ -163,7 +185,7 @@ import TutorialBeacon from './TutorialBeacon.vue'
 import TutorialCharacter from './TutorialCharacter.vue'
 import TutorialDialogue from './TutorialDialogue.vue'
 import TutorialManualEntry from './TutorialManualEntry.vue'
-import { calculateConnectorPath, expandRect } from './tutorialGeometry.mjs'
+import { calculateConnectorPath, expandRect, shouldAvoidDialogueTarget } from './tutorialGeometry.mjs'
 import { TUTORIAL_PHASES } from './tutorialMachine.mjs'
 import { useTutorialEngine } from './useTutorialEngine'
 
@@ -177,6 +199,7 @@ const dialogueRef = ref(null)
 const dialogueRect = ref(null)
 const relationSourceRect = ref(null)
 const relationTargetRect = ref(null)
+const dialogueAvoidsTarget = ref(false)
 let dialogueObserver = null
 
 const showFocusLayer = computed(() => engine.currentStep.value?.spotlight && ![
@@ -208,7 +231,10 @@ const targetFrameStyle = computed(() => {
 })
 const skipLabel = computed(() => engine.currentChapter.value.index === '00' ? '跳过序章' : `跳过第 ${engine.currentChapter.value.index} 章`)
 const inspectorAware = computed(() => Boolean(props.runtime.selectedAirspaceId.value) && ['A09-CONFLICT', 'D14-INSPECT', 'A09-DETOUR', 'D15-DETOUR', 'WAIT-DIAMOND'].includes(engine.currentStep.value.id))
-const liveAware = computed(() => engine.currentChapter.value.index === '00' && Boolean(props.runtime.hasSession.value))
+const liveAware = computed(() => ['00', '02'].includes(engine.currentChapter.value.index) && Boolean(props.runtime.hasSession.value))
+const activeGroundRun = computed(() => engine.currentChapter.value.index === '02'
+  && props.runtime.session.value?.status === 'RUNNING'
+  && props.runtime.context?.rawSnapshot?.value?.mission?.tutorialId === 'TUTORIAL-02-GROUND-COOP')
 const duoCast = computed(() => !engine.isActionMode.value
   && !engine.plannerAware.value
   && !engine.fleetAware.value
@@ -230,6 +256,9 @@ function updateLayout() {
     return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height }
   }
   dialogueRect.value = toRect(element)
+  if (!dialogueAvoidsTarget.value && shouldAvoidDialogueTarget(engine.targetRect.value, dialogueRect.value, viewport)) {
+    dialogueAvoidsTarget.value = true
+  }
   relationSourceRect.value = toRect(conflict)
   relationTargetRect.value = toRect(inspector)
 }
@@ -249,7 +278,8 @@ function observeDialogue() {
   })
 }
 
-watch(() => [engine.phase.value, engine.currentStep.value.id, engine.plannerAware.value, engine.fleetAware.value, props.runtime.selectedAirspaceId.value], observeDialogue)
+watch(() => engine.currentStep.value.id, () => { dialogueAvoidsTarget.value = false })
+watch(() => [engine.phase.value, engine.currentStep.value.id, engine.plannerAware.value, engine.fleetAware.value, props.runtime.selectedAirspaceId.value, engine.targetRect.value], observeDialogue)
 onMounted(() => {
   window.addEventListener('resize', updateLayout)
   observeDialogue()
@@ -266,6 +296,8 @@ onBeforeUnmount(() => {
 .tutorial-stage{position:absolute;inset:0;z-index:calc(var(--layer-tutorial) + 1);overflow:visible;pointer-events:none;transition:left .32s ease,right .32s ease}.tutorial-presentation.is-planner-aware .tutorial-stage{left:clamp(448px,30vw,530px)}.tutorial-presentation.is-live-aware:not(.is-planner-aware) .tutorial-stage{left:clamp(440px,32vw,620px);right:clamp(292px,19vw,380px)}.tutorial-presentation.is-live-aware.is-inspector-aware .tutorial-stage{right:clamp(360px,21vw,400px)}
 .tutorial-presentation.is-solo-cast :deep(.tutorial-dialogue){width:min(960px,calc(100% - 24px))}.tutorial-presentation.is-solo-cast :deep(.tutorial-character){width:clamp(260px,22vw,390px);height:clamp(310px,48vh,520px)}.tutorial-presentation.is-solo-cast :deep(.side-left){right:auto;left:12px}.tutorial-presentation.is-solo-cast :deep(.side-right){right:12px;left:auto}.tutorial-presentation.is-action-mode :deep(.tutorial-character.is-speaking){filter:brightness(.58) saturate(.6);opacity:.2;transform:translateY(12px) scale(.96)}
 .tutorial-presentation.is-timeline-step :deep(.tutorial-dialogue){right:auto;bottom:84px;left:50%;top:auto;width:min(920px,calc(100% - 12px));transform:translateX(-50%)}.tutorial-presentation.is-timeline-step :deep(.tutorial-character){bottom:86px}
+.tutorial-presentation.is-dialogue-avoiding-target :deep(.tutorial-dialogue){top:72px;bottom:auto;max-height:190px}.tutorial-presentation.is-dialogue-avoiding-target :deep(.tutorial-character){bottom:12px;opacity:.32}
+.tutorial-skip-confirm{position:absolute;left:50%;top:50%;z-index:calc(var(--layer-tutorial) + 12);display:grid;width:min(500px,calc(100vw - 40px));padding:25px 28px;border:1px solid rgba(255,209,102,.48);border-left:3px solid #ffd166;color:var(--text-primary);background:linear-gradient(125deg,rgba(4,16,25,.99),rgba(33,27,16,.98));box-shadow:0 28px 90px rgba(0,0,0,.7);pointer-events:auto;transform:translate(-50%,-50%);clip-path:polygon(0 0,calc(100% - 14px) 0,100% 14px,100% 100%,14px 100%,0 calc(100% - 14px))}.tutorial-skip-confirm>span{color:#ffd166;font:600 .58rem/1 monospace;letter-spacing:.16em}.tutorial-skip-confirm>strong{margin-top:12px;font-size:1.18rem}.tutorial-skip-confirm>p{margin:12px 0 0;color:var(--text-secondary);font-size:.8rem;line-height:1.65}.tutorial-skip-confirm .skip-error{color:#ff9b8f}.tutorial-skip-confirm>div{display:flex;justify-content:flex-end;gap:9px;margin-top:20px}.tutorial-skip-confirm button{min-height:38px;padding:0 14px;border:1px solid rgba(124,231,238,.25);color:var(--text-secondary);background:transparent}.tutorial-skip-confirm button.confirm{border-color:#ffd166;color:#1d1605;background:#ffd166;font-weight:750}.tutorial-skip-confirm button:disabled{opacity:.55}
 @keyframes relation-flow{to{stroke-dashoffset:-17}}@keyframes relation-source-pulse{50%{border-color:#c9ffe9;box-shadow:0 0 0 4px rgba(126,240,196,.1),0 0 30px rgba(126,240,196,.5)}}@keyframes connector-flow{to{stroke-dashoffset:-.055}}@keyframes wrong-pulse{35%{border-color:var(--signal-warning);box-shadow:0 0 0 5px rgba(255,197,111,.13)}}@keyframes success-ripple{0%{box-shadow:0 0 0 0 rgba(126,240,196,.52)}100%{border-color:rgba(126,240,196,0);box-shadow:0 0 0 24px rgba(126,240,196,0)}}@keyframes dossier-open{from{opacity:0;clip-path:polygon(49% 0,51% 0,51% 100%,49% 100%,49% 100%,49% 100%)}to{opacity:1}}@keyframes complete-enter{from{opacity:0;transform:translate(-50%,-47%)}to{opacity:1;transform:translate(-50%,-50%)}}
 @media(max-width:1366px){.tutorial-presentation.is-planner-aware .tutorial-stage{left:448px}.tutorial-presentation.is-live-aware:not(.is-planner-aware) .tutorial-stage{left:440px;right:292px}.tutorial-presentation.is-live-aware.is-inspector-aware .tutorial-stage{left:360px;right:360px}.tutorial-presentation.is-solo-cast :deep(.tutorial-character){width:clamp(244px,21vw,330px);height:clamp(292px,45vh,450px)}}
 @media(max-width:1600px) and (max-height:900px){.tutorial-presentation.is-live-aware :deep(.tutorial-dialogue){bottom:88px}.tutorial-presentation.is-live-aware :deep(.tutorial-character){bottom:88px}}

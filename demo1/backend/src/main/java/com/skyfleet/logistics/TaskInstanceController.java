@@ -3,6 +3,7 @@ package com.skyfleet.logistics;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -21,9 +22,13 @@ public class TaskInstanceController {
     private final TaskInstanceService tasks;
     private final DemoSessionService sessions;
     private final VisitorIdentity visitors;
+    private final TutorialProgressService tutorials;
+    private final AdvancedRoutingProperties advancedRouting;
 
-    public TaskInstanceController(TaskInstanceService tasks, DemoSessionService sessions, VisitorIdentity visitors) {
+    public TaskInstanceController(TaskInstanceService tasks, DemoSessionService sessions, VisitorIdentity visitors,
+                                  TutorialProgressService tutorials, AdvancedRoutingProperties advancedRouting) {
         this.tasks = tasks; this.sessions = sessions; this.visitors = visitors;
+        this.tutorials = tutorials; this.advancedRouting = advancedRouting;
     }
 
     @GetMapping("/scenario-templates")
@@ -32,7 +37,23 @@ public class TaskInstanceController {
     @PostMapping("/task-instances")
     public Map<String, Object> generate(@RequestBody GenerateRequest body, HttpServletRequest request, HttpServletResponse response) {
         VisitorIdentity.Identity visitor = visitors.resolve(request, response);
-        return tasks.generate(visitor.visitorHash(), body.scenarioTemplateId(), body.seed(), body.parameters());
+        String tutorialId = body.tutorialId();
+        String planningMode = body.planningMode() == null ? "BASIC" : body.planningMode();
+        String seed = body.seed();
+        Map<String, Object> parameters = body.parameters() == null ? new java.util.LinkedHashMap<>() : new java.util.LinkedHashMap<>(body.parameters());
+        if (TutorialProgressService.GROUND_COOP_ID.equals(tutorialId)) {
+            if (!tutorials.groundCoopAvailable(visitor.visitorHash()))
+                throw new DemoException(org.springframework.http.HttpStatus.FORBIDDEN, "教程 02 尚未解锁");
+            planningMode = "ADVANCED";
+            seed = "2026091202";
+            parameters.put("tutorialBatteryProtected", true);
+            parameters.put("airspaceThemeCount", 2);
+            parameters.put("trafficSignalsEnabled", false);
+        } else if ("ADVANCED".equalsIgnoreCase(planningMode)
+                && !advancedRouting.technicalPreviewEnabled && !tutorials.advancedUnlocked(visitor.visitorHash())) {
+            throw new DemoException(org.springframework.http.HttpStatus.FORBIDDEN, "请先完成教程 02 解锁进阶规划");
+        }
+        return tasks.generate(visitor.visitorHash(), body.scenarioTemplateId(), seed, parameters, planningMode, tutorialId);
     }
 
     @GetMapping("/task-instances")
@@ -50,9 +71,11 @@ public class TaskInstanceController {
     }
 
     @PostMapping("/task-instances/{taskId}/runs")
-    public Map<String, Object> start(@PathVariable String taskId, HttpServletRequest request, HttpServletResponse response) {
+    public Map<String, Object> start(@PathVariable String taskId, @RequestBody(required = false) StartRunRequest body,
+                                     HttpServletRequest request, HttpServletResponse response) {
         VisitorIdentity.Identity visitor = visitors.resolve(request, response);
-        return sessions.createFromTask(taskId, visitor.visitorHash(), source(request));
+        return sessions.createFromTask(taskId, visitor.visitorHash(), source(request),
+                body == null ? null : body.selectedBaselineRouteCandidateId());
     }
 
     @GetMapping("/runs/{runId}")
@@ -84,6 +107,16 @@ public class TaskInstanceController {
         return sessions.airspaceAction(runId, visitor.visitorHash(), volumeId, body.actionType());
     }
 
+    @PostMapping("/runs/{runId}/ground-routing-commands")
+    public ResponseEntity<Map<String, Object>> groundRoutingCommand(@PathVariable String runId,
+                                                                    @RequestBody GroundRouteCommandRequest body,
+                                                                    HttpServletRequest request, HttpServletResponse response) {
+        VisitorIdentity.Identity visitor = visitors.resolve(request, response);
+        Map<String, Object> accepted = sessions.groundRouteCommand(runId, visitor.visitorHash(), body.commandId(),
+                body.commandSequence(), body.type(), body.sourceType(), body.targetId(), body.position());
+        return ResponseEntity.accepted().body(accepted);
+    }
+
     @PostMapping("/runs/{runId}/rewind-checkpoints/{checkpointId}/restore")
     public Map<String, Object> restoreCheckpoint(@PathVariable String runId, @PathVariable String checkpointId,
                                                   @RequestBody RewindRequest body,
@@ -99,7 +132,11 @@ public class TaskInstanceController {
         String forwarded = request.getHeader("X-Forwarded-For");
         return forwarded != null && !forwarded.isBlank() ? forwarded.split(",", 2)[0].trim() : request.getRemoteAddr();
     }
-    public record GenerateRequest(String scenarioTemplateId, String seed, Map<String, Object> parameters) {}
+    public record GenerateRequest(String scenarioTemplateId, String seed, Map<String, Object> parameters,
+                                  String planningMode, String tutorialId) {}
+    public record StartRunRequest(String selectedBaselineRouteCandidateId) {}
+    public record GroundRouteCommandRequest(String commandId, long commandSequence, String type,
+                                            String sourceType, String targetId, java.util.List<Number> position) {}
     public record AirspaceActionRequest(String actionType) {}
     public record RewindRequest(String rewindId, long expectedRevision) {}
 }

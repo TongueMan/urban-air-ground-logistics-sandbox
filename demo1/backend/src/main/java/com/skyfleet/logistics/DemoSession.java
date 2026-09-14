@@ -37,6 +37,17 @@ public final class DemoSession {
     public volatile double airBatteryPercent = 100;
     public volatile boolean airBatteryDepleted;
     public volatile String terminalReason;
+    public volatile String planningMode = "BASIC";
+    public volatile String baselineRouteCandidateId;
+    public volatile GroundRoutingState groundRouting;
+    public volatile PaceState paceState;
+    public volatile long latestGroundCommandSequence;
+    public volatile boolean groundRouteRequestInFlight;
+    public volatile GroundRouteCommand pendingGroundRouteCommand;
+    public volatile long lastGroundRouteRequestAtMs;
+    public volatile double groundRouteRequestTokens = 3;
+    public volatile long groundRouteTokenRefillAtMs = System.currentTimeMillis();
+    public final Map<String, Object> tutorialEvidence = new ConcurrentHashMap<>();
     /** True while the visitor's current air deployment is a self-routed VTOL. */
     public volatile boolean independentAirRoute;
     public volatile Map<String, Object> plan;
@@ -94,6 +105,11 @@ public final class DemoSession {
         this.airAssetId = airVehicle.get("assetId") == null ? null : String.valueOf(airVehicle.get("assetId"));
         if (airVehicle.get("batteryPercent") instanceof Number battery) this.airBatteryPercent = battery.doubleValue();
         this.independentAirRoute = Boolean.TRUE.equals(airVehicle.get("independentRoute"));
+        if (plan != null) {
+            this.planningMode = String.valueOf(plan.getOrDefault("planningMode", "BASIC"));
+            Object selected = plan.get("selectedBaselineRouteCandidateId");
+            this.baselineRouteCandidateId = selected == null ? null : String.valueOf(selected);
+        }
         this.createdAt = createdAt;
     }
 
@@ -111,6 +127,8 @@ public final class DemoSession {
         value.put("paused", "RUNNING".equals(status) && timeScale == 0);
         if (groundAssetId != null) value.put("groundAssetId", groundAssetId);
         if (airAssetId != null) value.put("airAssetId", airAssetId);
+        value.put("planningMode", planningMode);
+        if (baselineRouteCandidateId != null) value.put("baselineRouteCandidateId", baselineRouteCandidateId);
         value.put("status", status);
         value.put("timeScale", timeScale);
         value.put("progress", progress);
@@ -146,6 +164,47 @@ public final class DemoSession {
     }
 
     public record DeltaEvent(long revision, String eventType, Map<String, Object> data) {}
+
+    public static final class GroundRoutingState {
+        public final String actorId;
+        public final List<List<Number>> baselinePoints;
+        public volatile List<List<Number>> activeRemainingPoints;
+        public volatile double distanceAlongActiveMeters;
+        public volatile double cumulativeActualMeters;
+        public volatile int routeVersion = 1;
+        public volatile int nextMandatoryNodeIndex;
+        public final List<List<Number>> mandatoryNodes;
+        public volatile Map<String, Object> activeTemporaryTarget;
+        public volatile String routeStatus = "ACTIVE";
+        public volatile String routeMessage = "沿计划路线行驶";
+
+        public GroundRoutingState(String actorId, List<List<Number>> baselinePoints,
+                                  List<List<Number>> activeRemainingPoints, List<List<Number>> mandatoryNodes) {
+            this.actorId = actorId;
+            this.baselinePoints = new ArrayList<>(baselinePoints);
+            this.activeRemainingPoints = new ArrayList<>(activeRemainingPoints);
+            this.mandatoryNodes = new ArrayList<>(mandatoryNodes);
+        }
+    }
+
+    public static final class PaceState {
+        public final String actorId;
+        public final List<List<Number>> routePoints;
+        public final double startDelaySeconds;
+        public final double deadlineSeconds;
+        public final double speedMetersPerSecond;
+        public volatile double distanceAlongRouteMeters;
+
+        public PaceState(String actorId, List<List<Number>> routePoints, double startDelaySeconds,
+                         double deadlineSeconds, double speedMetersPerSecond) {
+            this.actorId = actorId; this.routePoints = new ArrayList<>(routePoints);
+            this.startDelaySeconds = startDelaySeconds; this.deadlineSeconds = deadlineSeconds;
+            this.speedMetersPerSecond = speedMetersPerSecond;
+        }
+    }
+
+    public record GroundRouteCommand(String id, long sequence, String type, String sourceType,
+                                     String targetId, List<Number> requestedPosition) {}
 
     public static final class RewindCheckpoint {
         public final String id;

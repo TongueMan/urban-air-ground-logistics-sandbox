@@ -30,6 +30,14 @@ test('OSS static asset URLs keep the local public path as a fallback', async () 
     runtime.staticAssetUrl('/models/library/rewards/gold-coin.glb'),
     'https://java-tongueman.oss-cn-beijing.aliyuncs.com/project/models/library/rewards/gold-coin.glb'
   )
+  assert.equal(
+    runtime.staticAssetUrl('/models/library/rewards/trophy-low-poly-game-ready.glb'),
+    'https://java-tongueman.oss-cn-beijing.aliyuncs.com/project/models/library/rewards/trophy-low-poly-game-ready.glb'
+  )
+  assert.equal(
+    runtime.staticAssetUrl('/models/library/operations/highway-patrol-cruiser.glb'),
+    'https://java-tongueman.oss-cn-beijing.aliyuncs.com/project/models/library/operations/highway-patrol-cruiser.glb'
+  )
   assert.deepEqual(runtime.staticAssetCandidates('/tutorial/characters/anan-default.png', 'characters/anan-default.png'), [
     'https://java-tongueman.oss-cn-beijing.aliyuncs.com/project/characters/anan-default.png',
     '/tutorial/characters/anan-default.png'

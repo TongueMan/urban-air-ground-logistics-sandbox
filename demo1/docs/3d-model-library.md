@@ -15,6 +15,7 @@
 | --- | --- | --- | ---: | --- | --- |
 | `tricycle` | 地面车辆 | active | 1.17 MiB | CC BY 4.0 | 初始短途配送车、默认地面 Actor |
 | `ford-f350-utility` | 地面车辆 | active | 0.94 MiB | CC BY 4.0 | 多用途快速运输 |
+| `highway-patrol-cruiser` | 运营监管 | active | 5.16 MiB | CC BY 4.0 | 合同监管车专用模型、红蓝警灯交替闪烁 |
 | `ural-truck-vehicle-only` | 地面车辆 | active | 0.71 MiB | CC BY 4.0 | 复杂路况重载运输 |
 | `cybertruck-fun-size` | 地面车辆 | active | 2.85 MiB | CC BY-NC 4.0 | 高性能电动运输平台 |
 | `peterbilt-379-optimus-prime` | 地面车辆 | active | 3.44 MiB | CC BY 4.0 | 干线大宗运输 |
@@ -22,6 +23,7 @@
 | `vtol-air-taxi` | 航空器 | active | 23.73 MiB | CC BY 4.0 | 重载高速空中运输，按需加载 |
 | `gold-coin` | 奖励 | active | 0.05 MiB | CC BY 4.0 | 配送收益反馈 |
 | `pink-diamond` | 奖励 | active | 0.01 MiB | CC BY 4.0 | 空域操作挑战奖励 |
+| `trophy-low-poly-game-ready` | 奖励 | active | 0.04 MiB | CC BY 4.0 | 进阶地面路线奖杯奖励 |
 
 作者、原始链接、SHA-256、节点、网格、材质、纹理与动画数量以模型注册表和 `ATTRIBUTIONS.md` 为准。任何 CC BY 或 CC BY-NC 资产在产品与交付物中都必须保留对应署名和许可证链接。
 
@@ -35,6 +37,7 @@ frontend/public/models/
 └─ library/
    ├─ aircraft/                # VTOL 等航空器
    ├─ ground-vehicles/         # 地面运输车辆
+   ├─ operations/              # 监管、保障等非玩家运营资产
    └─ rewards/                 # 金币、挑战奖励
 ```
 

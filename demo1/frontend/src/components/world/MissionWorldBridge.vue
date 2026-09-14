@@ -7,11 +7,17 @@
     :time-cursor="context.timeCursor.value"
     :time-mode="context.timeMode.value"
     :planning-preview="runtime.plannerOpen.value && Boolean(runtime.taskPreview.value)"
+    :selected-baseline-id="runtime.selectedBaselineRouteCandidateId.value"
     :tutorial-red-conflict-locked="runtime.tutorialRedConflictLocked.value"
+    :tutorial-camera-target="runtime.tutorialMapCameraTarget.value"
     :model-assignments="modelAssignments"
     @select="context.focusActor"
     @select-airspace="runtime.selectAirspace"
     @follow-change="runtime.setMapFollowingDevice"
+    @select-baseline="runtime.selectedBaselineRouteCandidateId.value = $event"
+    @dispatch-ground-reward="runtime.setGroundTemporaryTarget({ sourceType: 'GROUND_REWARD', targetId: $event })"
+    @dispatch-map-point="runtime.setGroundTemporaryTarget({ sourceType: 'MAP_POINT', position: $event })"
+    @return-ground-baseline="runtime.returnGroundToBaseline"
   />
 </template>
 

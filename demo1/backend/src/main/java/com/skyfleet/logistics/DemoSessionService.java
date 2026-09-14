@@ -3,6 +3,8 @@ package com.skyfleet.logistics;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -10,6 +12,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -17,9 +21,12 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Service
 public class DemoSessionService {
+    private static final Logger log = LoggerFactory.getLogger(DemoSessionService.class);
     private static final Set<String> TERMINAL = Set.of("COMPLETED", "STOPPED", "EXPIRED", "FAILED");
     private static final Set<Double> SPEEDS = Set.of(0.0, 0.5, 1.0, 2.0, 5.0);
     private static final String ECONOMY_RULE_VERSION = "delivery-economy/2.0.0";
@@ -42,6 +49,10 @@ public class DemoSessionService {
     private final TaskTrafficEngine trafficLights;
     private final TaskInstanceService taskInstances;
     private final FleetService fleet;
+    private final BaiduRouteProvider baidu;
+    private final AdvancedRoutingProperties advancedRouting;
+    private final TutorialProgressService tutorials;
+    private final ExecutorService groundRouteExecutor;
     private final int maxActive;
     private final int maxQueue;
     private final int durationSeconds;
@@ -52,25 +63,44 @@ public class DemoSessionService {
     private final Map<String, Deque<Instant>> startsBySource = new ConcurrentHashMap<>();
     private final Object lock = new Object();
 
+    @Autowired
     public DemoSessionService(MissionCatalog catalog, JdbcTemplate jdbc, ObjectMapper mapper, MqttBridge mqtt,
                                TaskTrafficEngine trafficLights, TaskInstanceService taskInstances,
-                               FleetService fleet,
+                               FleetService fleet, BaiduRouteProvider baidu, AdvancedRoutingProperties advancedRouting,
+                               TutorialProgressService tutorials,
                               @Value("${demo.max-active-sessions}") int maxActive,
                               @Value("${demo.max-queue-size}") int maxQueue,
                               @Value("${demo.session-duration-seconds}") int durationSeconds,
                               @Value("${demo.disconnect-expiry-seconds}") int disconnectExpirySeconds) {
-        this.catalog = catalog; this.jdbc = jdbc; this.mapper = mapper; this.mqtt = mqtt; this.trafficLights = trafficLights; this.taskInstances = taskInstances; this.fleet = fleet;
+        this.catalog = catalog; this.jdbc = jdbc; this.mapper = mapper; this.mqtt = mqtt; this.trafficLights = trafficLights; this.taskInstances = taskInstances; this.fleet = fleet; this.baidu = baidu;
+        this.advancedRouting = advancedRouting; this.tutorials = tutorials;
         this.maxActive = maxActive; this.maxQueue = maxQueue; this.durationSeconds = durationSeconds;
         this.disconnectExpirySeconds = disconnectExpirySeconds;
+        this.groundRouteExecutor = Executors.newFixedThreadPool(Math.max(2, Math.min(8, maxActive)));
+    }
+
+    DemoSessionService(MissionCatalog catalog, JdbcTemplate jdbc, ObjectMapper mapper, MqttBridge mqtt,
+                       TaskTrafficEngine trafficLights, TaskInstanceService taskInstances, FleetService fleet,
+                       int maxActive, int maxQueue, int durationSeconds, int disconnectExpirySeconds) {
+        this(catalog, jdbc, mapper, mqtt, trafficLights, taskInstances, fleet,
+                null,
+                new AdvancedRoutingProperties(false, false, false, 300, 600, 2, 3, 40, 1500, 1.6, 18),
+                null, maxActive, maxQueue, durationSeconds, disconnectExpirySeconds);
     }
 
     @PostConstruct
     void initialize() {
-        jdbc.update("UPDATE demo_session SET status='EXPIRED',completed_at=NOW(3) WHERE status IN ('RUNNING','QUEUED')");
-        fleet.releaseInactiveBindings();
         restoreRecentSessions();
+        // A process/container restart is an infrastructure event, not a player
+        // decision. Keep persisted RUNNING/QUEUED sessions and their fleet
+        // bindings so reconnecting browsers can continue from the last tick.
+        fleet.releaseInactiveBindings();
+        promoteQueue();
         mqtt.setListener(this::acceptTelemetry);
     }
+
+    @PreDestroy
+    void shutdownRoutingExecutor() { groundRouteExecutor.shutdownNow(); }
 
     public Map<String, Object> current(String visitorHash) {
         DemoSession session = sessions.values().stream()
@@ -108,13 +138,18 @@ public class DemoSessionService {
 
     @Transactional
     public Map<String, Object> createFromTask(String taskId, String visitorHash, String source) {
+        return createFromTask(taskId, visitorHash, source, null);
+    }
+
+    @Transactional
+    public Map<String, Object> createFromTask(String taskId, String visitorHash, String source, String selectedCandidateId) {
         synchronized (lock) {
             DemoSession existing = sessions.values().stream().filter(item -> item.visitorHash.equals(visitorHash) && !TERMINAL.contains(item.status)).findFirst().orElse(null);
             if (existing != null) throw new DemoException(HttpStatus.CONFLICT, "已有正在运行或排队的任务");
             checkRate(source);
             long active = sessions.values().stream().filter(item -> "RUNNING".equals(item.status)).count();
             if (active >= maxActive && queue.size() >= maxQueue) throw new DemoException(HttpStatus.TOO_MANY_REQUESTS, "当前体验人数较多，请稍后再试");
-            Map<String, Object> plan = taskInstances.loadPlanOwned(taskId, visitorHash);
+            Map<String, Object> plan = taskInstances.preparePlanForStart(taskId, visitorHash, selectedCandidateId);
             String id = "RUN-" + UUID.randomUUID().toString().replace("-", "").substring(0, 20).toUpperCase();
             Map<String, Object> groundVehicle = castMap(plan.get("groundVehicle"));
             String groundAssetId = String.valueOf(groundVehicle.getOrDefault("assetId", ""));
@@ -133,12 +168,24 @@ public class DemoSessionService {
             String definitionVersion = String.valueOf(plan.getOrDefault("scenarioTemplateVersion", plan.getOrDefault("version", "1.0.0")));
             DemoSession session = new DemoSession(id, visitorHash, active < maxActive ? "RUNNING" : "QUEUED",
                     definitionId, definitionVersion, taskId, 1, "demo-simulator/2.0.0", plan, Instant.now());
+            if ("ADVANCED".equals(session.planningMode)) initializeAdvancedGroundRouting(session);
             if ("RUNNING".equals(session.status)) start(session); else { queue.addLast(id); session.queuePosition = queue.size(); }
-            jdbc.update("INSERT INTO demo_session(id,visitor_hash,definition_id,definition_version,task_instance_id,ground_asset_id,air_asset_id,run_no,engine_version,simulation_elapsed_ms,ground_service_elapsed_ms,status,time_scale,progress,mission_phase,queue_position,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    id, visitorHash, definitionId, definitionVersion, taskId, groundAssetId, airAssetId, 1, session.engineVersion, 0, 0, session.status, session.timeScale, 0,
+            jdbc.update("INSERT INTO demo_session(id,visitor_hash,definition_id,definition_version,task_instance_id,ground_asset_id,air_asset_id,run_no,engine_version,planning_mode,baseline_route_candidate_id,active_ground_route_version,latest_ground_command_sequence,ground_runtime_state_json,pace_plan_json,simulation_elapsed_ms,ground_service_elapsed_ms,status,time_scale,progress,mission_phase,queue_position,started_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    id, visitorHash, definitionId, definitionVersion, taskId, groundAssetId, airAssetId, 1, session.engineVersion,
+                    session.planningMode, session.baselineRouteCandidateId,
+                    session.groundRouting == null ? 0 : session.groundRouting.routeVersion, 0,
+                    session.groundRouting == null ? null : writeJson(groundRoutingView(session)),
+                    session.paceState == null ? null : writeJson(paceView(session)),
+                    0, 0, session.status, session.timeScale, 0,
                     session.missionPhase, session.queuePosition == 0 ? null : session.queuePosition,
                     session.startedAt == null ? null : java.sql.Timestamp.from(session.startedAt));
             sessions.put(id, session);
+            if (session.groundRouting != null) persistGroundRouteVersion(session, null);
+            if (TutorialProgressService.GROUND_COOP_ID.equals(String.valueOf(plan.get("tutorialId"))) && tutorials != null) {
+                session.tutorialEvidence.put("baselineSelected", true);
+                session.tutorialEvidence.put("taskStarted", true);
+                tutorials.recordGroundCoopEvidence(visitorHash, taskId, id, session.tutorialEvidence, false);
+            }
             return snapshot(session, true);
         }
     }
@@ -153,6 +200,437 @@ public class DemoSessionService {
         jdbc.update("UPDATE demo_session SET time_scale=?,last_seen_at=NOW(3) WHERE id=?", timeScale, id);
         return snapshot(session, true);
     }
+
+    @Transactional
+    public Map<String, Object> groundRouteCommand(String id, String visitorHash, String commandIdValue,
+                                                   long commandSequence, String typeValue, String sourceTypeValue,
+                                                   String targetIdValue, List<Number> requestedPosition) {
+        DemoSession session = owned(id, visitorHash);
+        if (!"RUNNING".equals(session.status) || session.groundRouting == null)
+            throw new DemoException(HttpStatus.CONFLICT, "只有运行中的进阶任务可以实时调度车辆");
+        String commandId = String.valueOf(commandIdValue == null ? "" : commandIdValue).trim();
+        if (!commandId.matches("[A-Za-z0-9._:-]{1,72}")) throw new DemoException(HttpStatus.BAD_REQUEST, "commandId 格式无效");
+        List<Map<String, Object>> existing = jdbc.query("SELECT response_json,status FROM demo_ground_route_command WHERE id=? AND session_id=?",
+                (result, row) -> {
+                    Map<String, Object> value = result.getString("response_json") == null ? new LinkedHashMap<>() : readJsonMap(result.getString("response_json"));
+                    value.put("status", result.getString("status")); return value;
+                }, commandId, id);
+        if (!existing.isEmpty()) return Map.of("command", existing.get(0));
+        String type = String.valueOf(typeValue == null ? "" : typeValue).trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("SET_TEMPORARY_TARGET", "RETURN_TO_BASELINE").contains(type))
+            throw new DemoException(HttpStatus.BAD_REQUEST, "不支持的地面调度命令");
+        String sourceType = String.valueOf(sourceTypeValue == null ? "" : sourceTypeValue).trim().toUpperCase(Locale.ROOT);
+        if ("SET_TEMPORARY_TARGET".equals(type) && !Set.of("GROUND_REWARD", "MAP_POINT").contains(sourceType))
+            throw new DemoException(HttpStatus.BAD_REQUEST, "临时目标仅支持地面奖励或地图位置");
+        if ("MAP_POINT".equals(sourceType) && (requestedPosition == null || requestedPosition.size() < 2))
+            throw new DemoException(HttpStatus.BAD_REQUEST, "地图目标缺少有效坐标");
+        synchronized (session) {
+            if (commandSequence <= session.latestGroundCommandSequence)
+                throw new DemoException(HttpStatus.CONFLICT, "STALE_GROUND_ROUTE_COMMAND");
+            refillGroundRouteTokens(session);
+            if (session.groundRouteRequestTokens < 1)
+                throw new DemoException(HttpStatus.TOO_MANY_REQUESTS, "GROUND_ROUTE_RATE_LIMITED");
+            session.groundRouteRequestTokens -= 1;
+            session.latestGroundCommandSequence = commandSequence;
+            DemoSession.GroundRouteCommand command = new DemoSession.GroundRouteCommand(commandId, commandSequence, type,
+                    sourceType.isBlank() ? null : sourceType, targetIdValue, requestedPosition);
+            if (session.pendingGroundRouteCommand != null) {
+                jdbc.update("UPDATE demo_ground_route_command SET status='SUPERSEDED',superseded_by_command_id=?,completed_at=NOW(3) WHERE id=? AND status='PENDING'",
+                        commandId, session.pendingGroundRouteCommand.id());
+            }
+            session.pendingGroundRouteCommand = command;
+            session.groundRouting.routeStatus = "PLANNING";
+            session.groundRouting.routeMessage = "正在更新路线 · 将采用最后一次目标";
+            Map<String, Object> response = commandView(command, "PENDING", null, null);
+            jdbc.update("INSERT INTO demo_ground_route_command(id,session_id,timeline_epoch,command_sequence,command_type,source_type,target_id,requested_position_json,status,response_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    command.id(), session.id, session.timelineEpoch, command.sequence(), command.type(), command.sourceType(), command.targetId(),
+                    command.requestedPosition() == null ? null : writeJson(command.requestedPosition()), "PENDING", writeJson(response));
+            persistAdvancedRuntimeState(session);
+            broadcastDelta(session, "ground-route-command", Map.of("command", response, "groundRouting", groundRoutingView(session)));
+            if (!session.groundRouteRequestInFlight) scheduleNextGroundRoute(session);
+            return Map.of("command", response, "groundRouting", groundRoutingView(session));
+        }
+    }
+
+    private void refillGroundRouteTokens(DemoSession session) {
+        long now = System.currentTimeMillis();
+        double elapsed = Math.max(0, now - session.groundRouteTokenRefillAtMs) / 1000.0;
+        session.groundRouteRequestTokens = Math.min(advancedRouting.requestBurst,
+                session.groundRouteRequestTokens + elapsed * advancedRouting.requestsPerSecond);
+        session.groundRouteTokenRefillAtMs = now;
+    }
+
+    private void scheduleNextGroundRoute(DemoSession session) {
+        session.groundRouteRequestInFlight = true;
+        groundRouteExecutor.execute(() -> processGroundRouteQueue(session));
+    }
+
+    private void processGroundRouteQueue(DemoSession session) {
+        while (true) {
+            DemoSession.GroundRouteCommand command;
+            synchronized (session) {
+                command = session.pendingGroundRouteCommand;
+                session.pendingGroundRouteCommand = null;
+                if (command == null || !"RUNNING".equals(session.status)) {
+                    session.groundRouteRequestInFlight = false;
+                    return;
+                }
+            }
+            long waitMs = Math.max(0, advancedRouting.minimumRequestIntervalMs
+                    - (System.currentTimeMillis() - session.lastGroundRouteRequestAtMs));
+            if (waitMs > 0) try { Thread.sleep(waitMs); } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt(); return;
+            }
+            session.lastGroundRouteRequestAtMs = System.currentTimeMillis();
+            GroundRouteResolution resolution = resolveGroundRoute(session, command);
+            synchronized (session) {
+                if (command.sequence() < session.latestGroundCommandSequence) {
+                    jdbc.update("UPDATE demo_ground_route_command SET status='SUPERSEDED',completed_at=NOW(3),superseded_by_command_id=(SELECT id FROM (SELECT id FROM demo_ground_route_command WHERE session_id=? AND command_sequence=? LIMIT 1) x) WHERE id=?",
+                            session.id, session.latestGroundCommandSequence, command.id());
+                    continue;
+                }
+                if (!resolution.success()) {
+                    session.groundRouting.routeStatus = "FAILED";
+                    session.groundRouting.routeMessage = resolution.message();
+                    Map<String, Object> view = commandView(command, "FAILED", resolution.failureCode(), null);
+                    jdbc.update("UPDATE demo_ground_route_command SET status='FAILED',failure_code=?,completed_at=NOW(3),response_json=? WHERE id=?",
+                            resolution.failureCode(), writeJson(view), command.id());
+                    persistAdvancedRuntimeState(session);
+                    broadcastDelta(session, "ground-route-command", Map.of("command", view, "groundRouting", groundRoutingView(session)));
+                    continue;
+                }
+                DemoSession.GroundRoutingState routing = session.groundRouting;
+                routing.activeRemainingPoints = TaskInstanceService.coordinateListsPublic(resolution.points());
+                routing.distanceAlongActiveMeters = 0;
+                routing.routeVersion++;
+                routing.routeStatus = "ACTIVE";
+                routing.routeMessage = "RETURN_TO_BASELINE".equals(command.type()) ? "已返回计划路线" : "已切换至最新调度路线";
+                routing.activeTemporaryTarget = "RETURN_TO_BASELINE".equals(command.type()) ? null
+                        : temporaryTarget(command, resolution.snappedTarget());
+                Map<String, Object> view = commandView(command, "APPLIED", null, routing.routeVersion);
+                jdbc.update("UPDATE demo_ground_route_command SET status='APPLIED',resolved_road_anchor_json=?,route_version=?,completed_at=NOW(3),response_json=? WHERE id=?",
+                        resolution.snappedTarget() == null ? null : writeJson(coordinateValue(resolution.snappedTarget())),
+                        routing.routeVersion, writeJson(view), command.id());
+                persistGroundRouteVersion(session, command.id());
+                persistAdvancedRuntimeState(session);
+                recordGroundTutorialCommandEvidence(session, command);
+                broadcastDelta(session, "ground-route-command", Map.of("command", view, "groundRouting", groundRoutingView(session)));
+                broadcastDelta(session, "ground-route-delta", Map.of("groundRouting", groundRoutingView(session)));
+            }
+        }
+    }
+
+    private void initializeAdvancedGroundRouting(DemoSession session) {
+        Map<String, Object> plan = definition(session);
+        Map<String, Object> groundActor = actors(session).stream()
+                .filter(actor -> "VEHICLE".equals(String.valueOf(actor.get("kind"))))
+                .findFirst().orElseThrow(() -> new DemoException(HttpStatus.CONFLICT, "进阶任务缺少地面车辆"));
+        Map<String, Object> groundRoute = route(session, String.valueOf(groundActor.get("routeId")));
+        List<List<Number>> baseline = TaskInstanceService.coordinateListsPublic(TaskInstanceService.points(groundRoute));
+        List<List<Number>> mandatory = new ArrayList<>();
+        if (plan.get("mandatoryGroundNodes") instanceof List<?> values) for (Object value : values) {
+            double[] point = coordinate(value);
+            if (point != null) mandatory.add(coordinateValue(point));
+        }
+        session.groundRouting = new DemoSession.GroundRoutingState(
+                String.valueOf(groundActor.get("id")), baseline, baseline, mandatory);
+        Map<String, Object> pacePlan = castMap(plan.get("paceVehiclePlan"));
+        if (!pacePlan.isEmpty()) {
+            List<List<Number>> pacePoints = coordinateListValues(pacePlan.get("routePoints"));
+            double delay = number(pacePlan.get("startDelaySeconds"), advancedRouting.paceHeadStartSeconds);
+            double deadline = number(pacePlan.get("deadlineSeconds"), delay + 1);
+            double distance = MissionMath.polylineDistance(pointsFromLists(pacePoints));
+            session.paceState = new DemoSession.PaceState(
+                    String.valueOf(pacePlan.getOrDefault("actorId", "PACE-VEH-001")), pacePoints, delay,
+                    deadline, distance / Math.max(1, deadline - delay));
+        }
+    }
+
+    private Map<String, Object> groundRoutingView(DemoSession session) {
+        DemoSession.GroundRoutingState routing = session.groundRouting;
+        if (routing == null) return Map.of();
+        List<double[]> active = pointsFromLists(routing.activeRemainingPoints);
+        double total = MissionMath.polylineDistance(active);
+        double[] position = active.isEmpty() ? null : MissionMath.sample(active, total <= 0 ? 1 : routing.distanceAlongActiveMeters / total);
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("actorId", routing.actorId);
+        value.put("baselineRouteCandidateId", session.baselineRouteCandidateId);
+        value.put("routeVersion", routing.routeVersion);
+        value.put("commandSequence", session.latestGroundCommandSequence);
+        value.put("authoritativePosition", position == null ? List.of() : coordinateValue(position));
+        value.put("baselinePoints", routing.baselinePoints);
+        value.put("activeRemainingPoints", routing.activeRemainingPoints);
+        value.put("distanceAlongActiveMeters", routing.distanceAlongActiveMeters);
+        value.put("remainingDistanceMeters", Math.max(0, total - routing.distanceAlongActiveMeters));
+        value.put("cumulativeActualMeters", routing.cumulativeActualMeters);
+        value.put("nextMandatoryNodeIndex", routing.nextMandatoryNodeIndex);
+        value.put("mandatoryNodes", routing.mandatoryNodes);
+        value.put("activeTemporaryTarget", routing.activeTemporaryTarget);
+        value.put("routeStatus", routing.routeStatus);
+        value.put("routeMessage", routing.routeMessage);
+        if (TutorialProgressService.GROUND_COOP_ID.equals(String.valueOf(definition(session).get("tutorialId"))))
+            value.put("tutorialEvidence", new LinkedHashMap<>(session.tutorialEvidence));
+        return value;
+    }
+
+    private Map<String, Object> paceView(DemoSession session) {
+        DemoSession.PaceState pace = session.paceState;
+        if (pace == null) return Map.of();
+        List<double[]> points = pointsFromLists(pace.routePoints);
+        double routeDistance = MissionMath.polylineDistance(points);
+        double paceElapsed = Math.max(0, session.simulationElapsedMs / 1000.0 - pace.startDelaySeconds);
+        double paceTravelSeconds = Math.max(0, pace.deadlineSeconds - pace.startDelaySeconds);
+        double playerRemaining = session.groundRouting == null ? 0 : Math.max(0,
+                MissionMath.polylineDistance(pointsFromLists(session.groundRouting.activeRemainingPoints))
+                        - session.groundRouting.distanceAlongActiveMeters);
+        double paceRemaining = Math.max(0, routeDistance - pace.distanceAlongRouteMeters);
+        double[] point = points.isEmpty() ? null : MissionMath.sample(points,
+                routeDistance <= 0 ? 1 : pace.distanceAlongRouteMeters / routeDistance);
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("actorId", pace.actorId); value.put("routePoints", pace.routePoints);
+        value.put("startDelaySeconds", pace.startDelaySeconds); value.put("deadlineSeconds", pace.deadlineSeconds);
+        value.put("contractDeadlineSimulationMs", Math.round(pace.deadlineSeconds * 1000));
+        value.put("departureCountdownSeconds", Math.max(0, pace.startDelaySeconds - session.simulationElapsedMs / 1000.0));
+        value.put("distanceAlongRouteMeters", pace.distanceAlongRouteMeters);
+        value.put("position", point == null ? List.of() : coordinateValue(point));
+        // Positive means the player has less route left than the pace vehicle.
+        // Comparing travelled metres falsely rewarded detours as "lead" distance.
+        value.put("distanceDeltaMeters", session.groundRouting == null ? 0 : paceRemaining - playerRemaining);
+        value.put("timeDeltaSeconds", Math.max(0, paceTravelSeconds - paceElapsed)
+                - playerRemaining / Math.max(.1, groundSpeedMetersPerSecond(session)));
+        value.put("deadlineMissed", session.simulationElapsedMs > Math.round(pace.deadlineSeconds * 1000));
+        value.put("status", session.simulationElapsedMs / 1000.0 < pace.startDelaySeconds ? "WAITING" :
+                pace.distanceAlongRouteMeters + .1 >= routeDistance ? "ARRIVED" : "RUNNING");
+        return value;
+    }
+
+    private void persistGroundRouteVersion(DemoSession session, String commandId) {
+        DemoSession.GroundRoutingState routing = session.groundRouting;
+        if (routing == null) return;
+        String json = writeJson(routing.activeRemainingPoints);
+        jdbc.update("INSERT INTO demo_ground_route_version(session_id,timeline_epoch,route_version,source_command_id,route_hash,distance_meters,route_json,activated_simulation_ms) VALUES(?,?,?,?,?,?,?,?)",
+                session.id, session.timelineEpoch, routing.routeVersion, commandId, sha256(json),
+                MissionMath.polylineDistance(pointsFromLists(routing.activeRemainingPoints)), json, session.simulationElapsedMs);
+    }
+
+    private void persistAdvancedRuntimeState(DemoSession session) {
+        jdbc.update("UPDATE demo_session SET active_ground_route_version=?,latest_ground_command_sequence=?,ground_runtime_state_json=?,pace_plan_json=? WHERE id=?",
+                session.groundRouting == null ? 0 : session.groundRouting.routeVersion,
+                session.latestGroundCommandSequence,
+                session.groundRouting == null ? null : writeJson(groundRoutingView(session)),
+                session.paceState == null ? null : writeJson(paceView(session)), session.id);
+    }
+
+    private Map<String, Object> readJsonMap(String json) {
+        try { return mapper.readValue(json, new TypeReference<>() {}); }
+        catch (Exception error) { return new LinkedHashMap<>(); }
+    }
+
+    private static Map<String, Object> commandView(DemoSession.GroundRouteCommand command, String status,
+                                                    String failureCode, Integer routeVersion) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("id", command.id()); value.put("sequence", command.sequence()); value.put("type", command.type());
+        value.put("sourceType", command.sourceType()); value.put("targetId", command.targetId());
+        value.put("requestedPosition", command.requestedPosition()); value.put("status", status);
+        if (failureCode != null) value.put("failureCode", failureCode);
+        if (routeVersion != null) value.put("routeVersion", routeVersion);
+        return value;
+    }
+
+    private GroundRouteResolution resolveGroundRoute(DemoSession session, DemoSession.GroundRouteCommand command) {
+        DemoSession.GroundRoutingState routing = session.groundRouting;
+        List<double[]> active = pointsFromLists(routing.activeRemainingPoints);
+        if (active.size() < 2) return GroundRouteResolution.failed("NO_ACTIVE_ROUTE", "当前路线不可用");
+        double total = MissionMath.polylineDistance(active);
+        double[] current = MissionMath.sample(active, total <= 0 ? 1 : routing.distanceAlongActiveMeters / total);
+        List<Number> target = null;
+        double targetSnapLimitMeters = advancedRouting.roadSnapMeters;
+        if ("SET_TEMPORARY_TARGET".equals(command.type())) {
+            if ("GROUND_REWARD".equals(command.sourceType())) {
+                Map<String, Object> reward = mapList(definition(session).get("groundRewards")).stream()
+                        .filter(item -> Objects.equals(command.targetId(), String.valueOf(item.get("id"))))
+                        .findFirst().orElse(null);
+                if (reward == null) return GroundRouteResolution.failed("REWARD_NOT_FOUND", "奖励点不存在");
+                double[] anchor = coordinate(reward.getOrDefault("roadAnchor", reward.get("position")));
+                if (anchor == null) return GroundRouteResolution.failed("INVALID_TARGET", "奖励道路锚点无效");
+                target = coordinateValue(anchor);
+                targetSnapLimitMeters = Math.min(targetSnapLimitMeters,
+                        number(reward.get("triggerRadiusMeters"), targetSnapLimitMeters));
+            } else target = command.requestedPosition();
+        }
+        CampusRoadGraph graph = new CampusRoadGraph(mapList(definition(session).get("routeCandidates")));
+        int nextMandatoryIndex = Math.min(routing.nextMandatoryNodeIndex, routing.mandatoryNodes.size());
+        List<List<Number>> mandatory = routing.mandatoryNodes.subList(nextMandatoryIndex, routing.mandatoryNodes.size());
+        boolean returningToBaseline = "RETURN_TO_BASELINE".equals(command.type());
+        CampusRoadGraph.Path path;
+        if (returningToBaseline) {
+            List<Number> windowStart = nextMandatoryIndex == 0 ? null
+                    : routing.mandatoryNodes.get(nextMandatoryIndex - 1);
+            List<Number> windowEnd = nextMandatoryIndex >= routing.mandatoryNodes.size() ? null
+                    : routing.mandatoryNodes.get(nextMandatoryIndex);
+            path = graph.returnToBaseline(coordinateValue(current), routing.baselinePoints,
+                    windowStart, windowEnd, advancedRouting.roadSnapMeters);
+        } else {
+            GroundRouteResolution providerRoute = resolveBaiduGroundRoute(current, target, mandatory,
+                    targetSnapLimitMeters);
+            if (!providerRoute.success()) return providerRoute;
+            path = new CampusRoadGraph.Path(providerRoute.points(),
+                    MissionMath.polylineDistance(providerRoute.points()), providerRoute.snappedTarget());
+        }
+        if (path == null) return GroundRouteResolution.failed("ROAD_SNAP_FAILED", "目标距校区可达道路过远");
+        double originalRemaining = Math.max(1, total - routing.distanceAlongActiveMeters);
+        if (!returningToBaseline && (path.distanceMeters() - originalRemaining > advancedRouting.maximumExtraMeters
+                || path.distanceMeters() > originalRemaining * advancedRouting.maximumRemainingRatio)
+        )
+            return GroundRouteResolution.failed("DETOUR_LIMIT_EXCEEDED", "新路线超出允许的绕行范围");
+        return new GroundRouteResolution(true, path.points(), path.snappedTarget(), null, null);
+    }
+
+    private GroundRouteResolution resolveBaiduGroundRoute(double[] current, List<Number> target,
+                                                           List<List<Number>> mandatory,
+                                                           double targetSnapLimitMeters) {
+        if (baidu == null)
+            return GroundRouteResolution.failed("ROUTE_PROVIDER_NOT_CONFIGURED", "百度道路规划尚未配置");
+        List<double[]> mandatoryPoints = mandatory.stream().map(DemoSessionService::coordinate)
+                .filter(Objects::nonNull).toList();
+        List<List<double[]>> requests = new ArrayList<>();
+        if (target != null) {
+            double[] targetPoint = coordinate(target);
+            // A temporary target is a stop at which the driver may turn around.
+            // Sending it as a waypoint in one continuous provider request preserves
+            // the incoming heading and can force a large loop instead of a legal
+            // U-turn. End the first route at the target and start a new route there.
+            requests.add(List.of(current.clone(), targetPoint));
+            if (!mandatoryPoints.isEmpty()) {
+                List<double[]> continuation = new ArrayList<>();
+                continuation.add(targetPoint.clone());
+                continuation.addAll(mandatoryPoints.stream().map(double[]::clone).toList());
+                requests.add(continuation);
+            }
+        } else {
+            List<double[]> anchors = new ArrayList<>();
+            anchors.add(current.clone());
+            anchors.addAll(mandatoryPoints.stream().map(double[]::clone).toList());
+            requests.add(anchors);
+        }
+        List<double[]> points = new ArrayList<>();
+        for (List<double[]> anchors : requests) {
+            BaiduRouteProvider.ProviderResult provider = baidu.driving(anchors);
+            if (!provider.success())
+                return GroundRouteResolution.failed("ROUTE_PROVIDER_" + provider.failureCode(),
+                        "百度道路规划暂不可用，已保留当前路线，请稍后重试");
+            appendGroundRouteSegment(points, TaskInstanceService.points(provider.route()));
+        }
+        if (points.size() < 2)
+            return GroundRouteResolution.failed("ROUTE_PROVIDER_EMPTY_PATH", "百度道路规划未返回可执行路线");
+        points.set(0, current.clone());
+
+        double[] snappedTarget = null;
+        if (target != null) {
+            GroundRouteProjection projection = projectToGroundRoute(coordinate(target), points);
+            if (projection == null || projection.distanceMeters() > targetSnapLimitMeters)
+                return GroundRouteResolution.failed("ROAD_SNAP_FAILED", "点击位置附近没有可达道路");
+            snappedTarget = projection.point();
+        }
+        for (List<Number> mandatoryValue : mandatory) {
+            GroundRouteProjection projection = projectToGroundRoute(coordinate(mandatoryValue), points);
+            if (projection == null || projection.distanceMeters() > advancedRouting.mandatoryNodeToleranceMeters)
+                return GroundRouteResolution.failed("MANDATORY_NODE_ROUTE_MISMATCH", "百度路线未经过后续必达节点");
+        }
+        return new GroundRouteResolution(true, points, snappedTarget, null, null);
+    }
+
+    static void appendGroundRouteSegment(List<double[]> route, List<double[]> segment) {
+        for (double[] point : segment) {
+            if (point == null || point.length < 2) continue;
+            if (!route.isEmpty() && MissionMath.distance(route.get(route.size() - 1), point) <= .2) continue;
+            route.add(point.clone());
+        }
+    }
+
+    private static GroundRouteProjection projectToGroundRoute(double[] point, List<double[]> route) {
+        if (point == null || route.size() < 2) return null;
+        GroundRouteProjection best = null;
+        for (int index = 1; index < route.size(); index++) {
+            double[] left = route.get(index - 1), right = route.get(index);
+            double latitudeScale = 111_320;
+            double longitudeScale = Math.cos(Math.toRadians((left[1] + right[1] + point[1]) / 3)) * latitudeScale;
+            double ax = left[0] * longitudeScale, ay = left[1] * latitudeScale;
+            double bx = right[0] * longitudeScale, by = right[1] * latitudeScale;
+            double px = point[0] * longitudeScale, py = point[1] * latitudeScale;
+            double dx = bx - ax, dy = by - ay;
+            double denominator = dx * dx + dy * dy;
+            double ratio = denominator < 1e-9 ? 0
+                    : MissionMath.clamp(((px - ax) * dx + (py - ay) * dy) / denominator, 0, 1);
+            double[] projected = new double[]{left[0] + (right[0] - left[0]) * ratio,
+                    left[1] + (right[1] - left[1]) * ratio, .35};
+            double distance = MissionMath.distance(point, projected);
+            if (best == null || distance < best.distanceMeters())
+                best = new GroundRouteProjection(projected, distance);
+        }
+        return best;
+    }
+
+    private static Map<String, Object> temporaryTarget(DemoSession.GroundRouteCommand command, double[] snapped) {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("sourceType", command.sourceType()); value.put("targetId", command.targetId());
+        value.put("requestedPosition", command.requestedPosition());
+        value.put("roadAnchor", snapped == null ? List.of() : coordinateValue(snapped));
+        return value;
+    }
+
+    private void recordGroundTutorialCommandEvidence(DemoSession session, DemoSession.GroundRouteCommand command) {
+        if (!TutorialProgressService.GROUND_COOP_ID.equals(String.valueOf(definition(session).get("tutorialId")))) return;
+        if ("SET_TEMPORARY_TARGET".equals(command.type()) && "GROUND_REWARD".equals(command.sourceType())) {
+            Map<String, Object> reward = mapList(definition(session).get("groundRewards")).stream()
+                    .filter(item -> Objects.equals(command.targetId(), String.valueOf(item.get("id"))))
+                    .findFirst().orElse(Map.of());
+            List<String> eligible = reward.get("eligibleCandidateIds") instanceof List<?> values
+                    ? values.stream().map(String::valueOf).toList() : List.of();
+            if (!eligible.contains(session.baselineRouteCandidateId)) session.tutorialEvidence.put("routeOutsideReward", true);
+        }
+        if ("RETURN_TO_BASELINE".equals(command.type())) session.tutorialEvidence.put("returnedToBaseline", true);
+        if (tutorials != null) tutorials.recordGroundCoopEvidence(session.visitorHash, session.taskInstanceId,
+                session.id, session.tutorialEvidence, false);
+    }
+
+    private static List<List<Number>> coordinateListValues(Object raw) {
+        if (!(raw instanceof List<?> values)) return new ArrayList<>();
+        List<List<Number>> result = new ArrayList<>();
+        for (Object value : values) { double[] point = coordinate(value); if (point != null) result.add(coordinateValue(point)); }
+        return result;
+    }
+
+    private static List<double[]> pointsFromLists(List<List<Number>> values) {
+        List<double[]> result = new ArrayList<>();
+        for (List<Number> value : values) if (value != null && value.size() >= 2)
+            result.add(new double[]{value.get(0).doubleValue(), value.get(1).doubleValue(), value.size() > 2 ? value.get(2).doubleValue() : .35});
+        return result;
+    }
+
+    private static List<Number> coordinateValue(double[] point) {
+        return List.of(point[0], point[1], point.length > 2 ? point[2] : .35);
+    }
+
+    private double groundSpeedMetersPerSecond(DemoSession session) {
+        return Math.max(.1, number(castMap(definition(session).get("groundVehicle")).get("speedKph"), 18) / 3.6);
+    }
+
+    private static String sha256(String value) {
+        try {
+            byte[] hash = java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.HexFormat.of().formatHex(hash);
+        } catch (java.security.NoSuchAlgorithmException error) { throw new IllegalStateException(error); }
+    }
+
+    private record GroundRouteResolution(boolean success, List<double[]> points, double[] snappedTarget,
+                                         String failureCode, String message) {
+        static GroundRouteResolution failed(String code, String message) {
+            return new GroundRouteResolution(false, List.of(), null, code, message);
+        }
+    }
+    private record GroundRouteProjection(double[] point, double distanceMeters) {}
 
     @Transactional
     public Map<String, Object> airspaceAction(String id, String visitorHash, String volumeId, String actionType) {
@@ -452,46 +930,70 @@ public class DemoSessionService {
         Instant now = Instant.now();
         for (DemoSession session : new ArrayList<>(sessions.values())) {
             if (!"RUNNING".equals(session.status)) continue;
-            if (!emitters.containsKey(session.id) && Duration.between(session.lastSeenAt, now).toSeconds() > disconnectExpirySeconds) { finish(session, "EXPIRED"); continue; }
-            if (session.timeScale == 0) continue;
-            long simulationStepMs = Math.round(1000 * session.timeScale);
-            session.simulationElapsedMs += simulationStepMs;
-            if (session.taskInstanceId != null) advanceTaskSimulation(session, simulationStepMs / 1000.0, now);
-            else {
-                double progressStep = (100.0 / missionDurationSeconds(session)) * session.timeScale;
-                advanceGroundVehicles(session, progressStep, now);
-                session.missionPhase = phase(session, session.progress);
-            }
-            if (session.taskInstanceId != null) {
-                processTemporaryAirspaceWarnings(session);
-                processRedAirspaceWarnings(session);
-                processRewindCheckpoints(session);
-                try { processMissionEconomy(session, simulationStepMs); }
-                catch (Exception error) { session.terminalReason = "ECONOMY_PROCESSING_FAILED"; finish(session, "FAILED"); continue; }
-                if (session.progress >= 100 && !session.groundBatteryDepleted && !session.airBatteryDepleted) {
-                    try { awardTimelinessReward(session); }
-                    catch (Exception error) { session.terminalReason = "ECONOMY_PROCESSING_FAILED"; finish(session, "FAILED"); continue; }
+            try {
+                if (!emitters.containsKey(session.id) && Duration.between(session.lastSeenAt, now).toSeconds() > disconnectExpirySeconds) { finish(session, "EXPIRED"); continue; }
+                if (session.timeScale == 0) continue;
+                long simulationStepMs = Math.round(1000 * session.timeScale);
+                session.simulationElapsedMs += simulationStepMs;
+                if (session.taskInstanceId != null) advanceTaskSimulation(session, simulationStepMs / 1000.0, now);
+                else {
+                    double progressStep = (100.0 / missionDurationSeconds(session)) * session.timeScale;
+                    advanceGroundVehicles(session, progressStep, now);
+                    session.missionPhase = phase(session, session.progress);
+                }
+                if (session.taskInstanceId != null) {
+                    processTemporaryAirspaceWarnings(session);
+                    processRedAirspaceWarnings(session);
+                    processRewindCheckpoints(session);
+                    try { processMissionEconomy(session, simulationStepMs); }
+                    catch (Exception error) {
+                        log.error("Mission economy processing failed for session {} at simulationTimeMs={}",
+                                session.id, session.simulationElapsedMs, error);
+                        session.terminalReason = "ECONOMY_PROCESSING_FAILED";
+                        finish(session, "FAILED");
+                        continue;
+                    }
+                    if (session.progress >= 100 && !session.groundBatteryDepleted && !session.airBatteryDepleted) {
+                        try { awardTimelinessReward(session); }
+                        catch (Exception error) {
+                            log.error("Timeliness reward processing failed for session {} at simulationTimeMs={}",
+                                    session.id, session.simulationElapsedMs, error);
+                            session.terminalReason = "ECONOMY_PROCESSING_FAILED";
+                            finish(session, "FAILED");
+                            continue;
+                        }
+                    }
+                }
+                recordEvents(session, now);
+                for (Map<String, Object> actor : actors(session)) publishTelemetry(session, actor, now);
+                if (!"RUNNING".equals(session.status)) continue;
+                if (session.groundBatteryDepleted) {
+                    session.terminalReason = "GROUND_BATTERY_DEPLETED";
+                    finish(session, "FAILED");
+                    continue;
+                }
+                if (session.airBatteryDepleted) {
+                    session.terminalReason = "AIR_BATTERY_DEPLETED";
+                    finish(session, "FAILED");
+                    continue;
+                }
+                jdbc.update("UPDATE demo_session SET progress=?,mission_phase=?,simulation_elapsed_ms=?,ground_service_elapsed_ms=?,status=?,last_seen_at=last_seen_at,completed_at=? WHERE id=?",
+                        session.progress, session.missionPhase, session.simulationElapsedMs, session.groundServiceElapsedMs,
+                        session.progress >= 100 ? "COMPLETED" : "RUNNING",
+                        session.progress >= 100 ? java.sql.Timestamp.from(now) : null, session.id);
+                if (session.groundRouting != null) persistAdvancedRuntimeState(session);
+                if (session.progress >= 100) finish(session, "COMPLETED");
+                else broadcastMissionDelta(session);
+            } catch (Exception error) {
+                log.error("Simulation tick failed for session {} at simulationTimeMs={}",
+                        session.id, session.simulationElapsedMs, error);
+                session.terminalReason = "SIMULATION_PROCESSING_FAILED";
+                try { finish(session, "FAILED"); }
+                catch (Exception finishError) {
+                    session.status = "FAILED";
+                    log.error("Could not persist terminal state for session {}", session.id, finishError);
                 }
             }
-            recordEvents(session, now);
-            for (Map<String, Object> actor : actors(session)) publishTelemetry(session, actor, now);
-            if (!"RUNNING".equals(session.status)) continue;
-            if (session.groundBatteryDepleted) {
-                session.terminalReason = "GROUND_BATTERY_DEPLETED";
-                finish(session, "FAILED");
-                continue;
-            }
-            if (session.airBatteryDepleted) {
-                session.terminalReason = "AIR_BATTERY_DEPLETED";
-                finish(session, "FAILED");
-                continue;
-            }
-            jdbc.update("UPDATE demo_session SET progress=?,mission_phase=?,simulation_elapsed_ms=?,ground_service_elapsed_ms=?,status=?,last_seen_at=last_seen_at,completed_at=? WHERE id=?",
-                    session.progress, session.missionPhase, session.simulationElapsedMs, session.groundServiceElapsedMs,
-                    session.progress >= 100 ? "COMPLETED" : "RUNNING",
-                    session.progress >= 100 ? java.sql.Timestamp.from(now) : null, session.id);
-            if (session.progress >= 100) finish(session, "COMPLETED");
-            else broadcastMissionDelta(session);
         }
         promoteQueue();
         cleanupRateLimits(now);
@@ -641,6 +1143,9 @@ public class DemoSessionService {
         session.previousActorPositions.forEach((key, point) -> positions.put(key, List.of(point[0], point[1], point[2])));
         state.put("previousActorPositions", positions);
         state.put("airspaceIncursionSequences", new LinkedHashMap<>(session.airspaceIncursionSequences));
+        if (session.groundRouting != null) state.put("groundRouting", groundRoutingView(session));
+        if (session.paceState != null) state.put("paceVehicle", paceView(session));
+        state.put("latestGroundCommandSequence", session.latestGroundCommandSequence);
         List<Map<String, Object>> incursions = new ArrayList<>();
         session.activeAirspaceIncursions.forEach((key, incursion) -> incursions.add(Map.of(
                 "key", key, "id", incursion.id, "volumeId", incursion.volumeId, "actorId", incursion.actorId,
@@ -660,6 +1165,20 @@ public class DemoSessionService {
         session.airBatteryPercent = number(state.get("airBatteryPercent"), session.airBatteryPercent);
         session.groundBatteryDepleted = false; session.airBatteryDepleted = false;
         session.terminalReason = null; session.status = "RUNNING"; session.timeScale = 0; session.timelineEpoch = targetEpoch;
+        if (session.groundRouting != null && state.get("groundRouting") instanceof Map<?, ?>) {
+            Map<String, Object> ground = castMap(state.get("groundRouting"));
+            session.groundRouting.activeRemainingPoints = coordinateListValues(ground.get("activeRemainingPoints"));
+            session.groundRouting.distanceAlongActiveMeters = number(ground.get("distanceAlongActiveMeters"), 0);
+            session.groundRouting.cumulativeActualMeters = number(ground.get("cumulativeActualMeters"), 0);
+            session.groundRouting.routeVersion = (int) number(ground.get("routeVersion"), 1);
+            session.groundRouting.nextMandatoryNodeIndex = (int) number(ground.get("nextMandatoryNodeIndex"), 0);
+            session.groundRouting.activeTemporaryTarget = ground.get("activeTemporaryTarget") instanceof Map<?, ?> ? castMap(ground.get("activeTemporaryTarget")) : null;
+            session.groundRouting.routeStatus = String.valueOf(ground.getOrDefault("routeStatus", "ACTIVE"));
+            session.groundRouting.routeMessage = String.valueOf(ground.getOrDefault("routeMessage", "已恢复检查点路线"));
+        }
+        if (session.paceState != null && state.get("paceVehicle") instanceof Map<?, ?> pace)
+            session.paceState.distanceAlongRouteMeters = number(pace.get("distanceAlongRouteMeters"), 0);
+        session.latestGroundCommandSequence = Math.round(number(state.get("latestGroundCommandSequence"), session.latestGroundCommandSequence));
         replaceMap(session.routeProgress, state.get("routeProgress"), new TypeReference<Map<String, Double>>() {});
         replaceMap(session.uavStates, state.get("uavStates"), new TypeReference<Map<String, String>>() {});
         replaceMap(session.trafficStops, state.get("trafficStops"), new TypeReference<Map<String, Map<String, Object>>>() {});
@@ -718,6 +1237,10 @@ public class DemoSessionService {
         jdbc.update("UPDATE demo_airspace_action SET superseded_by_rewind_id=? WHERE session_id=? AND timeline_epoch=? AND simulation_time_ms>=? AND superseded_by_rewind_id IS NULL",
                 rewindId, session.id, sourceEpoch, at);
         jdbc.update("UPDATE demo_airspace_incursion SET superseded_by_rewind_id=? WHERE session_id=? AND timeline_epoch=? AND entry_simulation_ms>=? AND superseded_by_rewind_id IS NULL",
+                rewindId, session.id, sourceEpoch, at);
+        jdbc.update("UPDATE demo_ground_route_command SET superseded_by_rewind_id=?,status='SUPERSEDED' WHERE session_id=? AND timeline_epoch=? AND requested_at>=? AND superseded_by_rewind_id IS NULL",
+                rewindId, session.id, sourceEpoch, createdAt);
+        jdbc.update("UPDATE demo_ground_route_version SET superseded_by_rewind_id=? WHERE session_id=? AND timeline_epoch=? AND activated_simulation_ms>=? AND superseded_by_rewind_id IS NULL",
                 rewindId, session.id, sourceEpoch, at);
     }
 
@@ -796,6 +1319,7 @@ public class DemoSessionService {
     }
 
     private void processMissionEconomy(DemoSession session, long simulationStepMs) {
+        boolean economySuppressed = Boolean.TRUE.equals(definition(session).get("economySuppressed"));
         Map<String, Map<String, Object>> actorsById = new LinkedHashMap<>();
         Map<String, double[]> currentPositions = new LinkedHashMap<>();
         for (Map<String, Object> actor : actors(session)) {
@@ -814,16 +1338,35 @@ public class DemoSessionService {
             if (!AirspaceGeometry.segmentPassesPoint(previous, current, target,
                     number(point.get("triggerRadiusMeters"), air ? 20 : 14),
                     number(point.get("altitudeToleranceMeters"), air ? 18 : 0), air)) continue;
+            if (economySuppressed) {
+                // 教程关闭的是资金结算，不是地图交互。仍要记录命中并广播最新集合，
+                // 否则车辆已经穿过金币，前端却永远不会播放拾取并移除模型。
+                session.collectedDeliveryPointIds.add(pointId);
+                broadcastDelta(session, "economy-delta", Map.of("economy", economyView(session)));
+                continue;
+            }
             long rewardMinor = point.get("rewardMinor") instanceof Number value ? value.longValue() : 0;
+            Map<String, Object> rewardMetadata = new LinkedHashMap<>();
+            rewardMetadata.put("kind", point.get("kind"));
+            rewardMetadata.put("routeId", point.get("routeId"));
+            // Ground rewards generated for route candidates do not necessarily have a
+            // routeProgress value. Map.of rejects null values and used to terminate the
+            // entire mission exactly when such a reward was reached.
+            if (point.get("routeProgress") != null) rewardMetadata.put("routeProgress", point.get("routeProgress"));
+            if (point.get("visualTier") != null) rewardMetadata.put("visualTier", point.get("visualTier"));
             Map<String, Object> applied = fleet.applyMissionTransaction(session.visitorHash,
                     "DELIVERY:" + session.id + ":E" + session.timelineEpoch + ":" + pointId, "DELIVERY_REWARD", rewardMinor,
                     session.id, pointId, actorId, session.simulationElapsedMs, ECONOMY_RULE_VERSION,
                     session.timelineEpoch,
-                    Map.of("kind", point.get("kind"), "routeId", point.get("routeId"),
-                            "routeProgress", point.get("routeProgress"), "visualTier", point.get("visualTier")));
+                    rewardMetadata);
             session.collectedDeliveryPointIds.add(pointId);
             broadcastDelta(session, "economy-delta", Map.of(
                     "economy", economyView(session), "transaction", applied.get("transaction")));
+        }
+
+        if (economySuppressed) {
+            currentPositions.forEach((actorId, point) -> session.previousActorPositions.put(actorId, point.clone()));
+            return;
         }
 
         for (Map<String, Object> diamond : mapList(definition(session).get("rewardDiamonds"))) {
@@ -984,6 +1527,9 @@ public class DemoSessionService {
     }
 
     private void awardTimelinessReward(DemoSession session) {
+        if (Boolean.TRUE.equals(definition(session).get("economySuppressed"))) return;
+        if (session.paceState != null
+                && session.simulationElapsedMs > Math.round(session.paceState.deadlineSeconds * 1000)) return;
         Map<String, Object> quote = castMap(definition(session).get("economyQuote"));
         long baseGroundRewardMinor = quote.get("baseGroundRewardMinor") instanceof Number value ? value.longValue() : 0;
         if (baseGroundRewardMinor <= 0 || session.groundServiceElapsedMs <= 0) return;
@@ -1082,6 +1628,16 @@ public class DemoSessionService {
     @SuppressWarnings("unchecked")
     private double[] actorPosition(DemoSession session, Map<String, Object> actor) {
         String deviceId = String.valueOf(actor.get("id"));
+        if (session.groundRouting != null && deviceId.equals(session.groundRouting.actorId)) {
+            List<double[]> active = pointsFromLists(session.groundRouting.activeRemainingPoints);
+            double distance = MissionMath.polylineDistance(active);
+            return MissionMath.sample(active, distance <= 0 ? 1 : session.groundRouting.distanceAlongActiveMeters / distance);
+        }
+        if (session.paceState != null && deviceId.equals(session.paceState.actorId)) {
+            List<double[]> pace = pointsFromLists(session.paceState.routePoints);
+            double distance = MissionMath.polylineDistance(pace);
+            return MissionMath.sample(pace, distance <= 0 ? 1 : session.paceState.distanceAlongRouteMeters / distance);
+        }
         boolean drone = "UAV".equals(String.valueOf(actor.get("kind")));
         String routeId = String.valueOf(actor.get("routeId"));
         Map<String, Object> actorRoute = route(session, routeId);
@@ -1097,6 +1653,7 @@ public class DemoSessionService {
         String uavState = drone ? session.uavStates.getOrDefault(deviceId, session.taskInstanceId == null ? "BASELINE" : "ON_CARRIER") : "";
         boolean carried = drone && ("ON_CARRIER".equals(uavState) || "RECOVERED".equals(uavState)) && !session.independentAirRoute;
         if (session.taskInstanceId != null && !drone) return MissionMath.sample(ground, vehicleProgress / 100.0);
+        if (session.groundRouting != null && carried) return addHeight(actorPosition(session, carrier), 2.0);
         if (session.taskInstanceId != null && carried) return addHeight(MissionMath.sample(ground, vehicleProgress / 100.0), 2.0);
         if (session.taskInstanceId != null && airProgress < 5)
             return MissionMath.smooth(recoveryPoint(actorRoute, "launchPoint"), air.get(0), airProgress / 5, 8);
@@ -1219,6 +1776,12 @@ public class DemoSessionService {
         @SuppressWarnings("unchecked") List<Map<String, Object>> routes = (List<Map<String, Object>>) mission.get("routes");
         routes.forEach(route -> {
             route.put("actualPoints", includeTracks ? safeTrackCopy(session.tracks.get(String.valueOf(route.get("deviceId")))) : List.of());
+            if (session.groundRouting != null
+                    && session.groundRouting.actorId.equals(String.valueOf(route.get("deviceId")))) {
+                route.put("effectivePoints", session.groundRouting.activeRemainingPoints);
+                route.put("runtimeRouteOverride", session.groundRouting.routeVersion > 1);
+                route.put("runtimeRouteVersion", session.groundRouting.routeVersion);
+            }
             List<List<Number>> override = session.airRouteOverrides.get(String.valueOf(route.get("routeId")));
             if (override != null) { route.put("effectivePoints", override); route.put("runtimeRouteOverride", true); }
         });
@@ -1232,6 +1795,10 @@ public class DemoSessionService {
         mission.put("airspace", airspaceRuntime(session, mission));
         if (session.taskInstanceId != null) mission.put("economy", economyView(session));
         mission.put("timeline", timelineView(session));
+        if (session.groundRouting != null) {
+            mission.put("groundRouting", groundRoutingView(session));
+            mission.put("paceVehicle", paceView(session));
+        }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("revision", session.revision.get()); result.put("session", session.publicView()); result.put("mission", mission);
         result.put("devices", session.devices.isEmpty() ? standbyDevices(session) : session.deviceList());
@@ -1301,6 +1868,10 @@ public class DemoSessionService {
         mission.put("airspace", airspaceRuntime(session, definition(session)));
         mission.put("economy", economyView(session));
         mission.put("timeline", timelineView(session));
+        if (session.groundRouting != null) {
+            mission.put("groundRouting", groundRoutingView(session));
+            mission.put("paceVehicle", paceView(session));
+        }
         broadcastDelta(session, "mission-delta", Map.of("session", session.publicView(), "mission", mission,
                 "signals", signalViews(session, events(session))));
     }
@@ -1331,6 +1902,63 @@ public class DemoSessionService {
     private boolean send(SseEmitter emitter, String event, Object data, long revision) { try { emitter.send(SseEmitter.event().id(String.valueOf(revision)).name(event).data(data)); if ("session-end".equals(event)) emitter.complete(); return true; } catch (Exception error) { return false; } }
     private void checkRate(String source) { Deque<Instant> starts = startsBySource.computeIfAbsent(source, ignored -> new ConcurrentLinkedDeque<>()); Instant cutoff = Instant.now().minusSeconds(600); while (!starts.isEmpty() && starts.peekFirst().isBefore(cutoff)) starts.removeFirst(); if (starts.size() >= 3) throw new DemoException(HttpStatus.TOO_MANY_REQUESTS, "同一来源10分钟内最多创建3次任务"); starts.addLast(Instant.now()); }
     private void cleanupRateLimits(Instant now) { startsBySource.entrySet().removeIf(entry -> entry.getValue().isEmpty() || entry.getValue().peekLast().isBefore(now.minusSeconds(600))); }
+
+    private void restoreAdvancedRuntimeState(DemoSession session, String groundJson, String paceJson,
+                                             int persistedRouteVersion, long persistedCommandSequence) {
+        initializeAdvancedGroundRouting(session);
+        session.latestGroundCommandSequence = Math.max(0, persistedCommandSequence);
+        Map<String, Object> ground = readJsonMap(groundJson);
+        if (!ground.isEmpty()) {
+            List<List<Number>> baseline = coordinateListValues(ground.get("baselinePoints"));
+            List<List<Number>> active = coordinateListValues(ground.get("activeRemainingPoints"));
+            List<List<Number>> mandatory = coordinateListValues(ground.get("mandatoryNodes"));
+            DemoSession.GroundRoutingState restored = new DemoSession.GroundRoutingState(
+                    String.valueOf(ground.getOrDefault("actorId", session.groundRouting.actorId)),
+                    baseline.isEmpty() ? session.groundRouting.baselinePoints : baseline,
+                    active.isEmpty() ? session.groundRouting.activeRemainingPoints : active,
+                    mandatory.isEmpty() ? session.groundRouting.mandatoryNodes : mandatory);
+            restored.distanceAlongActiveMeters = Math.max(0, number(ground.get("distanceAlongActiveMeters"), 0));
+            restored.cumulativeActualMeters = Math.max(0, number(ground.get("cumulativeActualMeters"), 0));
+            restored.routeVersion = Math.max(1, (int) number(ground.get("routeVersion"), persistedRouteVersion));
+            restored.nextMandatoryNodeIndex = Math.max(0, (int) number(ground.get("nextMandatoryNodeIndex"), 0));
+            Map<String, Object> temporary = castMap(ground.get("activeTemporaryTarget"));
+            restored.activeTemporaryTarget = temporary.isEmpty() ? null : new LinkedHashMap<>(temporary);
+            restored.routeStatus = String.valueOf(ground.getOrDefault("routeStatus", "ACTIVE"));
+            restored.routeMessage = String.valueOf(ground.getOrDefault("routeMessage", "沿当前路线行驶"));
+            session.groundRouting = restored;
+            Map<String, Object> evidence = castMap(ground.get("tutorialEvidence"));
+            if (!evidence.isEmpty()) session.tutorialEvidence.putAll(evidence);
+        }
+        Map<String, Object> pace = readJsonMap(paceJson);
+        if (session.paceState != null && !pace.isEmpty()) {
+            session.paceState.distanceAlongRouteMeters = Math.max(0,
+                    number(pace.get("distanceAlongRouteMeters"), 0));
+        }
+    }
+
+    private void reconcileRestoredRuntime(DemoSession session) {
+        if (session.groundRouting != null) {
+            double routeDistance = MissionMath.polylineDistance(pointsFromLists(session.groundRouting.activeRemainingPoints));
+            double telemetryProgress = session.routeProgress.getOrDefault(session.groundRouting.actorId, 0.0);
+            session.groundRouting.distanceAlongActiveMeters = Math.max(
+                    session.groundRouting.distanceAlongActiveMeters,
+                    routeDistance * MissionMath.clamp(telemetryProgress, 0, 100) / 100);
+            session.groundRouting.cumulativeActualMeters = Math.max(
+                    session.groundRouting.cumulativeActualMeters,
+                    session.groundServiceElapsedMs / 1000.0 * groundSpeedMetersPerSecond(session));
+        }
+        if (session.paceState != null) {
+            double routeDistance = MissionMath.polylineDistance(pointsFromLists(session.paceState.routePoints));
+            double elapsed = Math.max(0, session.simulationElapsedMs / 1000.0 - session.paceState.startDelaySeconds);
+            session.paceState.distanceAlongRouteMeters = Math.max(session.paceState.distanceAlongRouteMeters,
+                    Math.min(routeDistance, elapsed * session.paceState.speedMetersPerSecond));
+        }
+        if (session.taskInstanceId != null) {
+            try { economyView(session); }
+            catch (Exception error) { log.warn("Could not restore economy state for session {}", session.id, error); }
+        }
+    }
+
     private void restoreRecentSessions() {
         jdbc.query("SELECT s.* FROM demo_session s JOIN (SELECT visitor_hash,MAX(created_at) newest FROM demo_session WHERE created_at > NOW() - INTERVAL 24 HOUR GROUP BY visitor_hash) latest ON latest.visitor_hash=s.visitor_hash AND latest.newest=s.created_at",
                 result -> {
@@ -1350,7 +1978,16 @@ public class DemoSessionService {
                     if (result.wasNull()) session.queuePosition = 0;
                     if (result.getTimestamp("started_at") != null) session.startedAt = result.getTimestamp("started_at").toInstant();
                     if (result.getTimestamp("last_seen_at") != null) session.lastSeenAt = result.getTimestamp("last_seen_at").toInstant();
+                    if (("RUNNING".equals(session.status) || "QUEUED".equals(session.status))) {
+                        session.lastSeenAt = Instant.now();
+                        if ("ADVANCED".equals(session.planningMode)) {
+                            restoreAdvancedRuntimeState(session,
+                                    result.getString("ground_runtime_state_json"), result.getString("pace_plan_json"),
+                                    result.getInt("active_ground_route_version"), result.getLong("latest_ground_command_sequence"));
+                        }
+                    }
                     sessions.put(session.id, session);
+                    if ("QUEUED".equals(session.status)) queue.addLast(session.id);
                 });
         jdbc.query("SELECT c.* FROM demo_rewind_checkpoint c JOIN demo_session s ON s.id=c.session_id WHERE s.created_at > NOW() - INTERVAL 24 HOUR ORDER BY c.simulation_time_ms",
                 result -> {
@@ -1455,6 +2092,8 @@ public class DemoSessionService {
                 }
             } catch (Exception ignored) {}
         });
+        sessions.values().stream().filter(session -> "RUNNING".equals(session.status) || "QUEUED".equals(session.status))
+                .forEach(this::reconcileRestoredRuntime);
     }
 
     private Map<String, Object> actorMetadata(DemoSession session, String actorId) {
@@ -1500,7 +2139,142 @@ public class DemoSessionService {
         }
     }
 
+    private void advanceAdvancedTaskSimulation(DemoSession session, double simulationStepSeconds) {
+        DemoSession.GroundRoutingState routing = session.groundRouting;
+        List<double[]> active = pointsFromLists(routing.activeRemainingPoints);
+        double routeDistance = Math.max(.001, MissionMath.polylineDistance(active));
+        double groundSpeed = groundSpeedMetersPerSecond(session);
+        double[] currentPoint = MissionMath.sample(active, routing.distanceAlongActiveMeters / routeDistance);
+        boolean independent = session.independentAirRoute;
+        int recoveryIndex = independent ? -1 : Math.max(0, routing.mandatoryNodes.size() - 2);
+        boolean atRecovery = !independent && routing.nextMandatoryNodeIndex == recoveryIndex
+                && MissionMath.distance(currentPoint, coordinate(routing.mandatoryNodes.get(recoveryIndex)))
+                <= advancedRouting.mandatoryNodeToleranceMeters;
+        boolean uavRecovered = actors(session).stream().filter(actor -> "UAV".equals(String.valueOf(actor.get("kind"))))
+                .allMatch(actor -> "RECOVERED".equals(session.uavStates.getOrDefault(String.valueOf(actor.get("id")), "ON_CARRIER")));
+        double requestedMeters = atRecovery && !uavRecovered ? 0
+                : Math.min(groundSpeed * simulationStepSeconds, Math.max(0, routeDistance - routing.distanceAlongActiveMeters));
+        Map<String, Object> groundVehicle = castMap(definition(session).get("groundVehicle"));
+        double fullRangeKm = Math.max(.001, number(groundVehicle.get("fullRangeKm"), 1));
+        FleetService.BatteryUse groundUse = tutorialBatteryProtected(session)
+                ? protectedBatteryUse(requestedMeters, session.groundBatteryPercent)
+                : fleet.consumeGroundDistance(session.visitorHash, session.id, session.groundAssetId, requestedMeters, fullRangeKm);
+        routing.distanceAlongActiveMeters += groundUse.movedMeters();
+        routing.cumulativeActualMeters += groundUse.movedMeters();
+        session.groundBatteryPercent = groundUse.batteryPercent();
+        if (groundUse.depleted() && routing.distanceAlongActiveMeters + .1 < routeDistance) session.groundBatteryDepleted = true;
+        if (requestedMeters > 0) session.groundServiceElapsedMs += Math.round(
+                Math.min(simulationStepSeconds, groundUse.movedMeters() / groundSpeed) * 1000);
+
+        currentPoint = MissionMath.sample(active, routing.distanceAlongActiveMeters / routeDistance);
+        while (routing.nextMandatoryNodeIndex < routing.mandatoryNodes.size()) {
+            int index = routing.nextMandatoryNodeIndex;
+            double[] node = coordinate(routing.mandatoryNodes.get(index));
+            if (node == null || MissionMath.distance(currentPoint, node) > advancedRouting.mandatoryNodeToleranceMeters) break;
+            if (index == recoveryIndex && !uavRecovered) {
+                routing.routeStatus = "WAITING_FOR_UAV";
+                routing.routeMessage = "已到达返航点，正在等待无人机";
+                session.trafficStops.put(routing.actorId, Map.of("deviceId", routing.actorId,
+                        "reason", "WAITING_FOR_UAV", "source", "RENDEZVOUS_COORDINATION"));
+                break;
+            }
+            routing.nextMandatoryNodeIndex++;
+            session.trafficStops.remove(routing.actorId);
+            routing.routeStatus = "ACTIVE";
+            routing.routeMessage = "沿当前路线行驶";
+            if (!independent && index == 0) session.tutorialEvidence.put("uavTakeoff", true);
+            if (!independent && index == recoveryIndex) session.tutorialEvidence.put("uavRecovered", true);
+        }
+        if (routing.activeTemporaryTarget != null) {
+            double[] target = coordinate(routing.activeTemporaryTarget.get("roadAnchor"));
+            if (target != null && MissionMath.distance(currentPoint, target) <= advancedRouting.mandatoryNodeToleranceMeters) {
+                routing.activeTemporaryTarget.put("reached", true);
+            }
+        }
+        double groundRouteProgress = MissionMath.clamp(routing.distanceAlongActiveMeters / routeDistance * 100, 0, 100);
+        session.routeProgress.put(routing.actorId, groundRouteProgress);
+
+        Map<String, Object> airVehicle = castMap(definition(session).get("airVehicle"));
+        double airRangeKm = Math.max(.001, number(airVehicle.get("fullRangeKm"), 1));
+        for (Map<String, Object> actor : actors(session).stream()
+                .filter(actor -> "UAV".equals(String.valueOf(actor.get("kind")))).toList()) {
+            String actorId = String.valueOf(actor.get("id"));
+            String state = session.uavStates.getOrDefault(actorId, "ON_CARRIER");
+            boolean launchReached = independent || routing.nextMandatoryNodeIndex > 0;
+            boolean carrierAtRecovery = carrierReadyForRecovery(independent,
+                    routing.nextMandatoryNodeIndex, recoveryIndex, atRecovery);
+            double airProgress = session.routeProgress.getOrDefault(actorId, 0.0);
+            if ("ON_CARRIER".equals(state) && launchReached) state = "TAKEOFF";
+            if (!"ON_CARRIER".equals(state) && !"RECOVERED".equals(state) && !"WAITING_FOR_CARRIER".equals(state)) {
+                String routeId = String.valueOf(actor.get("routeId"));
+                Map<String, Object> airRoute = route(session, routeId);
+                double distance = Math.max(1, number(airRoute.get("distanceMeters"), MissionMath.polylineDistance(points(session, routeId))));
+                double speed = Math.max(.1, number(airRoute.get("nominalSpeedKph"), 20) / 3.6);
+                double proposed = advanceAirSortieProgress(airProgress, speed, simulationStepSeconds, distance);
+                double requested = Math.max(0, executableAirRouteProgress(proposed) - executableAirRouteProgress(airProgress)) / 100 * distance;
+                FleetService.BatteryUse use = tutorialBatteryProtected(session)
+                        ? protectedBatteryUse(requested, session.airBatteryPercent)
+                        : fleet.consumeAirDistance(session.visitorHash, session.id, session.airAssetId, requested, airRangeKm, 1);
+                if (requested > 0 && use.movedMeters() + 1e-6 < requested) {
+                    double reached = executableAirRouteProgress(airProgress) + use.movedMeters() / distance * 100;
+                    airProgress = sortieProgressForAirRoute(reached);
+                } else airProgress = proposed;
+                session.airBatteryPercent = use.batteryPercent();
+                if (use.depleted() && airProgress < 100 - 1e-6) session.airBatteryDepleted = true;
+                state = airProgress < 8 ? "TAKEOFF" : airProgress < 100 ? "AIR_MISSION" :
+                        carrierAtRecovery ? "RECOVERED" : "WAITING_FOR_CARRIER";
+                session.routeProgress.put(actorId, airProgress);
+            } else if ("WAITING_FOR_CARRIER".equals(state) && carrierAtRecovery) state = "RECOVERED";
+            session.uavStates.put(actorId, state);
+        }
+
+        uavRecovered = actors(session).stream().filter(actor -> "UAV".equals(String.valueOf(actor.get("kind"))))
+                .allMatch(actor -> "RECOVERED".equals(session.uavStates.getOrDefault(String.valueOf(actor.get("id")), "ON_CARRIER")));
+        if (atRecovery && uavRecovered && routing.nextMandatoryNodeIndex == recoveryIndex) {
+            routing.nextMandatoryNodeIndex++;
+            routing.routeStatus = "ACTIVE"; routing.routeMessage = "无人机已回收，继续驶往终点";
+            session.trafficStops.remove(routing.actorId); session.tutorialEvidence.put("uavRecovered", true);
+        }
+        if (session.paceState != null) {
+            DemoSession.PaceState pace = session.paceState;
+            double paceDistance = MissionMath.polylineDistance(pointsFromLists(pace.routePoints));
+            if (session.simulationElapsedMs / 1000.0 >= pace.startDelaySeconds)
+                pace.distanceAlongRouteMeters = Math.min(paceDistance,
+                        pace.distanceAlongRouteMeters + pace.speedMetersPerSecond * simulationStepSeconds);
+            session.routeProgress.put(pace.actorId, paceDistance <= 0 ? 100 : pace.distanceAlongRouteMeters / paceDistance * 100);
+        }
+        boolean groundComplete = routing.distanceAlongActiveMeters + .2 >= routeDistance
+                && routing.nextMandatoryNodeIndex >= routing.mandatoryNodes.size();
+        double uavProgress = actors(session).stream().filter(actor -> "UAV".equals(String.valueOf(actor.get("kind"))))
+                .mapToDouble(actor -> session.routeProgress.getOrDefault(String.valueOf(actor.get("id")), 0.0)).average().orElse(100);
+        double combinedProgress = MissionMath.clamp(groundRouteProgress * .6 + uavProgress * .4, 0, 99.99);
+        session.progress = groundComplete && uavRecovered ? 100 : Math.max(session.progress, combinedProgress);
+        String uavState = session.uavStates.values().stream().findFirst().orElse("RECOVERED");
+        session.missionPhase = groundComplete && uavRecovered ? "DOCKED" : switch (uavState) {
+            case "TAKEOFF" -> "TAKEOFF";
+            case "AIR_MISSION" -> "DELIVERING";
+            case "WAITING_FOR_CARRIER", "RECOVERED" -> "RETURNING";
+            default -> "DEPART";
+        };
+        if (session.progress >= 100 && TutorialProgressService.GROUND_COOP_ID.equals(
+                String.valueOf(definition(session).get("tutorialId")))) {
+            session.tutorialEvidence.put("missionCompleted", true);
+            if (tutorials != null) tutorials.recordGroundCoopEvidence(session.visitorHash, session.taskInstanceId,
+                    session.id, session.tutorialEvidence, true);
+        }
+        persistAdvancedRuntimeState(session);
+    }
+
+    static boolean carrierReadyForRecovery(boolean independent, int nextMandatoryNodeIndex,
+                                           int recoveryIndex, boolean physicallyAtRecovery) {
+        return independent || physicallyAtRecovery;
+    }
+
     private void advanceTaskSimulation(DemoSession session, double simulationStepSeconds, Instant now) {
+        if (session.groundRouting != null) {
+            advanceAdvancedTaskSimulation(session, simulationStepSeconds);
+            return;
+        }
         List<Map<String, Object>> vehicles = actors(session).stream().filter(actor -> "VEHICLE".equals(String.valueOf(actor.get("kind")))).toList();
         List<Map<String, Object>> uavs = actors(session).stream().filter(actor -> "UAV".equals(String.valueOf(actor.get("kind")))).toList();
         Map<String, Object> groundVehicle = castMap(definition(session).get("groundVehicle"));
